@@ -43,6 +43,12 @@ interface SentimentData {
 }
 
 const sentimentData = ref<SentimentData | null>(null);
+const behaviorBiasData = ref<{
+  confirmation_bias: number;
+  loss_aversion: number;
+  herd_mentality: number;
+  overconfidence: number;
+} | null>(null);
 const userEmotion = ref('neutral');
 
 // 情绪指数
@@ -56,7 +62,7 @@ const extremeAlert = computed(() => sentimentData.value?.extreme_alert);
 
 // 行为偏差数据
 const userBias = computed(() => {
-  const bias = sentimentData.value?.behavior_bias;
+  const bias = behaviorBiasData.value;
   if (bias) {
     return {
       confirmationBias: bias.confirmation_bias,
@@ -66,10 +72,10 @@ const userBias = computed(() => {
     };
   }
   return {
-    confirmationBias: 75,
-    lossAversion: 82,
-    herdMentality: 60,
-    overconfidence: 45,
+    confirmationBias: 0,
+    lossAversion: 0,
+    herdMentality: 0,
+    overconfidence: 0,
   };
 });
 
@@ -224,47 +230,25 @@ const fetchSentimentData = async () => {
   error.value = '';
 
   try {
-    const response = await fetch('/api/market/sentiment');
-    if (response.ok) {
-      const data = await response.json();
-      sentimentData.value = data;
+    const [sentimentRes, biasRes] = await Promise.all([
+      fetch('/api/market/sentiment'),
+      fetch('/api/market/behavior-bias'),
+    ]);
+
+    if (!sentimentRes.ok) {
+      throw new Error(`获取情绪数据失败 (${sentimentRes.status})`);
+    }
+    sentimentData.value = await sentimentRes.json();
+
+    if (biasRes.ok) {
+      behaviorBiasData.value = await biasRes.json();
     } else {
-      // 使用 Mock 数据
-      sentimentData.value = {
-        sentiment_index: 68,
-        status: '贪婪',
-        market_state: '强势上涨',
-        warning_signals: 1,
-        extreme_alert: '市场过热，警惕回调风险',
-        data_source: 'Mock数据',
-        update_time: new Date().toLocaleString('zh-CN'),
-        is_mock: true,
-        behavior_bias: {
-          confirmation_bias: 75,
-          loss_aversion: 82,
-          herd_mentality: 60,
-          overconfidence: 45,
-        },
-      };
+      behaviorBiasData.value = null;
     }
   } catch (err) {
-    // 使用 Mock 数据
-    sentimentData.value = {
-      sentiment_index: 68,
-      status: '贪婪',
-      market_state: '强势上涨',
-      warning_signals: 1,
-      extreme_alert: '市场过热，警惕回调风险',
-      data_source: 'Mock数据',
-      update_time: new Date().toLocaleString('zh-CN'),
-      is_mock: true,
-      behavior_bias: {
-        confirmation_bias: 75,
-        loss_aversion: 82,
-        herd_mentality: 60,
-        overconfidence: 45,
-      },
-    };
+    error.value = err instanceof Error ? err.message : '获取情绪数据失败';
+    sentimentData.value = null;
+    behaviorBiasData.value = null;
   } finally {
     isLoading.value = false;
   }
@@ -309,7 +293,7 @@ onMounted(() => {
           <div class="bg-white rounded-xl border border-slate-200 p-6">
             <div class="flex items-center justify-between mb-6">
               <h2 class="text-lg font-semibold text-slate-900">市场情绪指数</h2>
-              <span v-if="sentimentData?.is_mock" class="px-2 py-1 text-xs bg-amber-100 text-amber-700 rounded">演示数据</span>
+              <span v-if="error" class="px-2 py-1 text-xs bg-red-100 text-red-700 rounded">加载失败</span>
             </div>
             <div class="flex items-center gap-8">
               <div class="relative">

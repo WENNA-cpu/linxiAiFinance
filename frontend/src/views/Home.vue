@@ -25,6 +25,11 @@ import BarChartIcon from '@/components/icons/BarChartIcon.vue';
 const router = useRouter();
 const portfolioStore = usePortfolioStore();
 
+const goToTrace = () => {
+  const lastId = localStorage.getItem('last_diagnosis_id');
+  router.push(lastId ? `/trace/${lastId}` : '/trace/latest');
+};
+
 const showCalculator = ref(false);
 const marketSentiment = ref({
   index: 50,
@@ -75,7 +80,7 @@ const features = [
     title: '分析溯源',
     desc: '查看AI分析的数据来源与依据',
     icon: SearchIcon,
-    path: '/trace/demo-request-id',
+    path: '/trace/latest',
     color: 'bg-rose-500',
   },
   {
@@ -204,7 +209,7 @@ onMounted(() => {
             合规说明
           </button>
           <button
-            @click="router.push('/trace/demo-request-id')"
+            @click="goToTrace()"
             class="flex items-center gap-2 text-sm font-medium text-slate-600 hover:text-indigo-600 transition-colors"
           >
             <SearchIcon class="w-4 h-4" />

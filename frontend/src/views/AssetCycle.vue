@@ -253,100 +253,9 @@ const initChart = async () => {
   chartInstance.setOption(option);
 };
 
-// 基于股票代码生成确定性随机数（保证同一股票数据一致）
-const hashCode = (str: string): number => {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash;
-  }
-  return Math.abs(hash);
-};
-
-// 生成基于股票代码的估值数据
-const generateValuationData = (tsCode: string) => {
-  const hash = hashCode(tsCode);
-  const codeNum = parseInt(tsCode.replace(/\D/g, '')) || hash % 10000;
-
-  // 根据股票代码特征生成基础PE/PB
-  const basePE = 5 + (hash % 20); // 5-25
-  const basePB = 0.5 + (hash % 30) / 10; // 0.5-3.5
-
-  // 生成3年历史数据（约750个交易日）
-  const peHistory: Array<{ date: string; value: number }> = [];
-  const pbHistory: Array<{ date: string; value: number }> = [];
-
-  const endDate = new Date();
-  const startDate = new Date();
-  startDate.setFullYear(endDate.getFullYear() - 3);
-
-  let currentPE = basePE;
-  let currentPB = basePB;
-
-  for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
-    // 跳过周末
-    if (d.getDay() === 0 || d.getDay() === 6) continue;
-
-    const dateStr = d.toISOString().split('T')[0];
-    const dayHash = hashCode(tsCode + dateStr);
-
-    // 随机波动
-    const peChange = (dayHash % 100 - 50) / 100; // -0.5 to 0.5
-    const pbChange = (dayHash % 100 - 50) / 150; // -0.33 to 0.33
-
-    currentPE = Math.max(3, currentPE + peChange);
-    currentPB = Math.max(0.3, currentPB + pbChange);
-
-    peHistory.push({ date: dateStr, value: Math.round(currentPE * 100) / 100 });
-    pbHistory.push({ date: dateStr, value: Math.round(currentPB * 100) / 100 });
-  }
-
-  // 计算分位数
-  const peValues = peHistory.map(h => h.value).sort((a, b) => a - b);
-  const pbValues = pbHistory.map(h => h.value).sort((a, b) => a - b);
-
-  const pe30Index = Math.floor(peValues.length * 0.3);
-  const pe70Index = Math.floor(peValues.length * 0.7);
-  const pb30Index = Math.floor(pbValues.length * 0.3);
-  const pb70Index = Math.floor(pbValues.length * 0.7);
-
-  const pe30 = peValues[pe30Index];
-  const pe70 = peValues[pe70Index];
-  const pb30 = pbValues[pb30Index];
-  const pb70 = pbValues[pb70Index];
-
-  // 当前估值（取最近一天）
-  const finalPE = peHistory[peHistory.length - 1]?.value || basePE;
-  const finalPB = pbHistory[pbHistory.length - 1]?.value || basePB;
-
-  // 判断区间
-  let interval: string;
-  let suggestion: string;
-
-  if (finalPE < pe30) {
-    interval = '低估区间';
-    suggestion = '小幅加仓';
-  } else if (finalPE > pe70) {
-    interval = '高估区间';
-    suggestion = '小幅减仓';
-  } else {
-    interval = '合理区间';
-    suggestion = '持有观望';
-  }
-
-  return {
-    current_pe: Math.round(finalPE * 100) / 100,
-    current_pb: Math.round(finalPB * 100) / 100,
-    pe_30_percentile: Math.round(pe30 * 100) / 100,
-    pe_70_percentile: Math.round(pe70 * 100) / 100,
-    pb_30_percentile: Math.round(pb30 * 100) / 100,
-    pb_70_percentile: Math.round(pb70 * 100) / 100,
-    interval,
-    suggestion,
-    pe_history: peHistory,
-    pb_history: pbHistory,
-  };
+const normalizeTsCode = (code: string) => {
+  if (code.includes('.')) return code;
+  return code.startsWith('6') ? `${code}.SH` : `${code}.SZ`;
 };
 
 // 获取周期分析数据
@@ -357,21 +266,26 @@ const fetchCycleAnalysis = async () => {
   error.value = '';
 
   try {
-    // 直接在前端生成基于股票代码的估值数据
-    const assetName = portfolioAssets.value.find(a => a.code === selectedAsset.value)?.name || selectedAsset.value.split('.')[0];
-    const valuationData = generateValuationData(selectedAsset.value);
+    const tsCode = normalizeTsCode(selectedAsset.value);
+    const response = await fetch('/api/cycle/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        asset_code: tsCode,
+        time_range: timeRange.value,
+      }),
+    });
 
-    cycleData.value = {
-      ts_code: selectedAsset.value,
-      name: assetName,
-      ...valuationData,
-      is_mock: false,
-    };
+    if (!response.ok) {
+      const errBody = await response.json().catch(() => ({}));
+      throw new Error(errBody.detail || `获取周期分析失败 (${response.status})`);
+    }
 
-    // 初始化图表
+    cycleData.value = await response.json();
     setTimeout(() => initChart(), 100);
   } catch (err) {
-    error.value = '数据生成失败';
+    error.value = err instanceof Error ? err.message : '获取周期分析数据失败';
+    cycleData.value = null;
   } finally {
     isLoading.value = false;
   }
