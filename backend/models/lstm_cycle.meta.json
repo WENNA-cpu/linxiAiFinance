@@ -1,0 +1,10 @@
+{
+  "train_samples": 7216,
+  "test_samples": 1804,
+  "epochs_trained": 8,
+  "final_loss": 0.0006939712911844254,
+  "final_val_loss": 0.0002641794562805444,
+  "model_path": "E:\\linxiAiFinance\\backend\\models\\lstm_cycle.h5",
+  "scaler_path": "E:\\linxiAiFinance\\backend\\models\\lstm_cycle_scaler.pkl",
+  "loss_plot": "E:\\linxiAiFinance\\backend\\models\\reports\\lstm_loss_curve.png"
+}

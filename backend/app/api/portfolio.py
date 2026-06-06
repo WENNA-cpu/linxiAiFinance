@@ -9,6 +9,11 @@ import aiohttp
 
 from app.models.database import get_db
 from app.models.portfolio import AuditLog
+from app.services.data_service import DataService
+from app.services.lstm_cycle_service import get_lstm_predictor
+from app.services.rf_risk_service import get_rf_predictor
+from app.services.model_manager import should_use_new_model
+from app.config import NEW_MODEL_RATIO
 
 router = APIRouter()
 
@@ -82,7 +87,74 @@ async def fetch_stock_quote(ts_code: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def create_audit_log(db: Session, request_id: str, step_name: str, step_status: str, step_detail: str, started_at: Optional[datetime] = None):
+def _normalize_ts_code(code: str) -> str:
+    if "." in code:
+        return code
+    return f"{code}.SH" if code.startswith("6") else f"{code}.SZ"
+
+
+async def fetch_asset_history(ts_code: str, days: int = 365) -> List[Dict[str, Any]]:
+    """获取资产历史日线+估值用于 RF/LSTM"""
+    svc = DataService()
+    end = datetime.now()
+    start = end - timedelta(days=days)
+    sd, ed = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
+    daily = await svc.fetch_daily_data(ts_code, sd, ed) or []
+    basic = await svc.fetch_daily_basic_historical(ts_code, sd, ed) or []
+    basic_map = {b.get("trade_date"): b for b in basic}
+    rows = []
+    for d in sorted(daily, key=lambda x: x.get("trade_date", "")):
+        td = d.get("trade_date")
+        merged = dict(d)
+        if td in basic_map:
+            merged.update({k: basic_map[td].get(k) for k in ("pe", "pb", "ps", "turnover_rate")})
+        rows.append(merged)
+    return rows
+
+
+async def _run_lstm_trend(assets: List, asset_quotes: dict, request_id: str) -> Dict[str, Any]:
+    use_new = should_use_new_model(request_id, NEW_MODEL_RATIO)
+    predictor = get_lstm_predictor(use_new=use_new)
+    trends_up = 0
+    forecasts = []
+    for asset in assets[:10]:
+        ts_code = _normalize_ts_code(asset.code)
+        history = await fetch_asset_history(ts_code, days=120)
+        closes = [float(r["close"]) for r in history if r.get("close")]
+        if len(closes) < 30:
+            continue
+        pred = predictor.predict(closes)
+        if pred.get("available"):
+            forecasts.append({"code": asset.code, "name": asset.name, **pred})
+            if pred.get("trend") == "up":
+                trends_up += 1
+    return {
+        "available": bool(forecasts),
+        "forecasts": forecasts,
+        "bullish_ratio": round(trends_up / max(len(forecasts), 1), 2),
+        "model_variant": "new" if use_new else "legacy",
+    }
+
+
+async def _run_rf_risk(assets: List) -> Dict[str, Any]:
+    predictor = get_rf_predictor()
+    histories = []
+    for asset in assets:
+        ts_code = _normalize_ts_code(asset.code)
+        history = await fetch_asset_history(ts_code, days=180)
+        if len(history) >= 30:
+            histories.append({"code": asset.code, "name": asset.name, "history": history})
+    return predictor.assess_portfolio(histories)
+
+
+def create_audit_log(
+    db: Session,
+    request_id: str,
+    step_name: str,
+    step_status: str,
+    step_detail: str,
+    started_at: Optional[datetime] = None,
+) -> AuditLog:
     """创建审计日志记录"""
     log = AuditLog(
         request_id=request_id,
@@ -90,10 +162,33 @@ def create_audit_log(db: Session, request_id: str, step_name: str, step_status: 
         step_status=step_status,
         step_detail=step_detail,
         started_at=started_at or datetime.utcnow(),
-        completed_at=datetime.utcnow() if step_status in ["成功", "失败"] else None
+        completed_at=datetime.utcnow() if step_status in ["成功", "失败", "警告"] else None,
     )
     db.add(log)
     db.commit()
+    db.refresh(log)
+    return log
+
+
+def record_audit_step(
+    db: Session,
+    request_id: str,
+    step_name: str,
+    step_detail: str,
+    audit_logs: List[Dict[str, Any]],
+    step_status: str = "成功",
+    started_at: Optional[datetime] = None,
+) -> AuditLog:
+    """写入审计日志并同步收集到响应列表"""
+    log = create_audit_log(db, request_id, step_name, step_status, step_detail, started_at)
+    audit_logs.append({
+        "step_order": len(audit_logs) + 1,
+        "step_name": step_name,
+        "step_status": step_status,
+        "step_detail": step_detail,
+        "started_at": log.started_at.isoformat() if log.started_at else None,
+        "completed_at": log.completed_at.isoformat() if log.completed_at else None,
+    })
     return log
 
 
@@ -166,20 +261,26 @@ def _get_sector(code: str) -> str:
 @router.post("/diagnose")
 async def diagnose_portfolio(data: PortfolioInput, db: Session = Depends(get_db)):
     """AI持仓诊断 - 基于真实持仓数据生成结论"""
-    request_id = f"diag_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-    print(f"[诊断] 收到请求，request_id: {request_id}, 资产数量: {len(data.assets) if data.assets else 0}")
-
-    # 步骤1：请求接收 - 记录审计日志
-    step_start = datetime.utcnow()
-    create_audit_log(db, request_id, "请求接收", "成功", f"用户发起持仓诊断请求，共{len(data.assets) if data.assets else 0}只资产", step_start)
-
+    request_id = f"diag_{datetime.now().strftime('%Y%m%d%H%M%S')}_{datetime.now().microsecond // 1000:03d}"
+    audit_logs: List[Dict[str, Any]] = []
     assets = data.assets
     total_assets = len(assets)
 
+    print(f"[诊断] 收到请求，request_id: {request_id}, 资产数量: {total_assets}")
+
+    record_audit_step(
+        db, request_id, "请求接收", "用户发起持仓诊断请求", audit_logs,
+        started_at=datetime.utcnow(),
+    )
+
     if total_assets == 0:
-        create_audit_log(db, request_id, "结果生成", "失败", "无持仓数据，诊断终止", datetime.utcnow())
+        record_audit_step(
+            db, request_id, "结果生成", "无持仓数据，诊断终止", audit_logs,
+            step_status="失败",
+        )
         return {
             "request_id": request_id,
+            "audit_logs": audit_logs,
             "confidence": 0,
             "summary": {
                 "total_assets": 0,
@@ -200,47 +301,32 @@ async def diagnose_portfolio(data: PortfolioInput, db: Session = Depends(get_db)
             },
         }
 
-    # 步骤2：数据获取 - 记录审计日志
     step_start = datetime.utcnow()
-
-    # 获取每个资产的真实行情（从Tushare）
     asset_quotes = {}
     success_count = 0
     for asset in assets:
-        # 转换代码格式（如 000001.SZ）
         ts_code = asset.code
         if '.' not in ts_code:
-            if ts_code.startswith('6'):
-                ts_code = f"{ts_code}.SH"
-            else:
-                ts_code = f"{ts_code}.SZ"
-
+            ts_code = f"{ts_code}.SH" if ts_code.startswith('6') else f"{ts_code}.SZ"
         quote = await fetch_stock_quote(ts_code)
         if quote:
             asset_quotes[asset.code] = quote
             success_count += 1
-            print(f"[Tushare] {asset.code} 涨跌幅: {quote.get('pct_chg', 0)}%")
-        else:
-            print(f"[Tushare] {asset.code} 获取失败，使用用户数据")
 
-    # 记录数据获取完成
-    create_audit_log(db, request_id, "数据获取", "成功", f"从Tushare行情数据获取行情数据，共{total_assets}只资产，成功{success_count}只", step_start)
+    record_audit_step(
+        db, request_id, "数据获取",
+        f"共{total_assets}只资产",
+        audit_logs, started_at=step_start,
+    )
 
-    # 步骤3：数据清洗 - 记录审计日志
     step_start = datetime.utcnow()
-
-    # 计算持仓整体表现（基于Tushare真实行情）
     total_cost = sum(a.cost_price * 100 for a in assets if a.cost_price)
     total_current = sum(a.current_price * 100 for a in assets if a.current_price)
     total_change_pct = ((total_current - total_cost) / total_cost * 100) if total_cost > 0 else 0
 
-    # 识别风险资产和机会资产（基于Tushare今日涨跌幅）
     risk_assets = []
     opportunity_assets = []
     sector_performance = {}
-
-    # 记录数据清洗完成
-    create_audit_log(db, request_id, "数据清洗", "成功", f"完成缺失值处理和格式转换，共处理{total_assets}条数据", step_start)
 
     for asset in assets:
         # 优先使用Tushare的今日涨跌幅
@@ -276,26 +362,73 @@ async def diagnose_portfolio(data: PortfolioInput, db: Session = Depends(get_db)
             sector_performance[sector] = []
         sector_performance[sector].append(today_change_pct)
 
-    # 计算各板块平均涨跌幅
+    record_audit_step(
+        db, request_id, "数据清洗", "完成缺失值处理", audit_logs, started_at=step_start,
+    )
+
     sector_avg = {s: sum(p) / len(p) for s, p in sector_performance.items()}
     best_sector = max(sector_avg.items(), key=lambda x: x[1]) if sector_avg else ("未知", 0)
     worst_sector = min(sector_avg.items(), key=lambda x: x[1]) if sector_avg else ("未知", 0)
 
-    # 步骤4：LSTM模型预测 - 记录审计日志
-    step_start = datetime.utcnow()
-    create_audit_log(db, request_id, "LSTM模型预测", "成功", f"完成时序分析和趋势预测，识别出{len(opportunity_assets)}个机会资产", step_start)
+    lstm_start = datetime.utcnow()
+    lstm_result = await _run_lstm_trend(assets, asset_quotes, request_id)
+    if lstm_result.get("available"):
+        lstm_detail = (
+            f"完成趋势分析，{len(lstm_result['forecasts'])}只资产预测，"
+            f"看涨比例{lstm_result['bullish_ratio']:.0%}，模型={lstm_result['model_variant']}"
+        )
+    else:
+        lstm_detail = "完成趋势分析（模型未就绪，使用规则补充）"
+    record_audit_step(
+        db, request_id, "LSTM模型预测", lstm_detail, audit_logs,
+        started_at=lstm_start,
+    )
 
-    # 步骤5：随机森林风险评估 - 记录审计日志
-    step_start = datetime.utcnow()
-    create_audit_log(db, request_id, "随机森林风险评估", "成功", f"识别出{len(risk_assets)}个风险资产", step_start)
+    rf_start = datetime.utcnow()
+    rf_result = await _run_rf_risk(assets)
+    rf_high_risk = rf_result.get("high_risk_count", 0)
+    rf_risk_assets = [
+        p for p in rf_result.get("asset_predictions", [])
+        if p.get("risk_level") == "高风险"
+    ]
+    if rf_result.get("model_available") and rf_risk_assets:
+        for ra in rf_risk_assets:
+            if not any(r["code"] == ra.get("code") for r in risk_assets):
+                risk_assets.append({
+                    "code": ra.get("code"),
+                    "name": ra.get("name"),
+                    "change_pct": 0,
+                    "today_change": 0,
+                    "rf_risk_level": ra.get("risk_level"),
+                })
+    rf_detail = (
+        f"识别出{rf_high_risk}个风险资产（随机森林）"
+        if rf_result.get("model_available")
+        else f"识别出{len(risk_assets)}个风险资产（规则引擎）"
+    )
+    record_audit_step(
+        db, request_id, "随机森林风险评估", rf_detail, audit_logs,
+        started_at=rf_start,
+    )
 
-    # 步骤6：规则引擎校验 - 记录审计日志
-    step_start = datetime.utcnow()
-    rule_check_result = "通过" if len(risk_assets) <= total_assets * 0.5 else "警告"
-    create_audit_log(db, request_id, "规则引擎校验", "成功" if rule_check_result == "通过" else "警告", f"{rule_check_result}所有风控规则校验", step_start)
+    rule_passed = len(risk_assets) <= total_assets * 0.5
+    record_audit_step(
+        db, request_id, "规则引擎校验",
+        "通过所有风控规则" if rule_passed else f"触发风控警告：风险资产占比偏高（{len(risk_assets)}/{total_assets}）",
+        audit_logs,
+        step_status="成功" if rule_passed else "警告",
+        started_at=datetime.utcnow(),
+    )
 
     # 生成市场趋势结论
-    if total_change_pct > 0:
+    if lstm_result.get("available") and lstm_result.get("forecasts"):
+        avg_chg = sum(f.get("change_pct", 0) for f in lstm_result["forecasts"]) / len(lstm_result["forecasts"])
+        market_trend = (
+            f"LSTM 模型预测持仓整体未来5日趋势{'偏多' if avg_chg > 0 else '偏空'}"
+            f"（平均预期变动 {avg_chg:.2f}%）。"
+            f"当前持仓盈亏 {total_change_pct:.2f}%。"
+        )
+    elif total_change_pct > 0:
         market_trend = f"您的持仓整体上涨 {total_change_pct:.2f}%，表现良好。建议关注盈利资产的持续性，同时注意风险控制。"
     elif total_change_pct < -5:
         market_trend = f"您的持仓整体下跌 {abs(total_change_pct):.2f}%，建议关注风险，可考虑适当调整仓位。"
@@ -331,8 +464,6 @@ async def diagnose_portfolio(data: PortfolioInput, db: Session = Depends(get_db)
         opportunities.append("整体持仓盈利良好，可考虑部分获利了结")
     if not opportunities:
         opportunities.append("建议关注低估值优质资产的配置机会")
-
-    request_id = f"diag_{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
     # 构建资产详情（基于用户成本价计算真实盈亏）
     assets_detail = []
@@ -371,12 +502,14 @@ async def diagnose_portfolio(data: PortfolioInput, db: Session = Depends(get_db)
             "data_source": data_source,
         })
 
-    # 步骤7：结果生成 - 记录审计日志
-    step_start = datetime.utcnow()
-    create_audit_log(db, request_id, "结果生成", "成功", f"诊断报告生成完毕，共分析{total_assets}只资产，识别{len(risk_assets)}个风险点", step_start)
+    record_audit_step(
+        db, request_id, "结果生成", "诊断报告生成完毕", audit_logs,
+        started_at=datetime.utcnow(),
+    )
 
     return {
         "request_id": request_id,
+        "audit_logs": audit_logs,
         "confidence": 85,
         "summary": {
             "total_assets": total_assets,
@@ -401,6 +534,8 @@ async def diagnose_portfolio(data: PortfolioInput, db: Session = Depends(get_db)
             "opportunity_assets_detail": opportunity_assets,
             "sector_performance": sector_avg,
             "assets": assets_detail,
+            "lstm_forecast": lstm_result,
+            "rf_assessment": rf_result,
         },
     }
 

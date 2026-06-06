@@ -1,4 +1,3 @@
-"""Commit 3 专用：Tushare 估值周期分析（不含 LSTM 模型依赖）"""
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -9,6 +8,9 @@ import numpy as np
 from app.models.database import get_db
 from app.services.ai_service import AIService, ModelTrainingService
 from app.services.data_service import DataService
+from app.services.lstm_cycle_service import get_lstm_predictor
+from app.services.model_manager import should_use_new_model
+from app.config import NEW_MODEL_RATIO
 
 router = APIRouter()
 
@@ -58,8 +60,31 @@ def determine_interval(current: float, p30: float, p70: float) -> tuple:
     return "合理区间", "持有观望"
 
 
+async def fetch_close_prices(ts_code: str, days: int = 365 * 3) -> List[float]:
+    data_service = DataService()
+    end = datetime.now()
+    start = end - timedelta(days=days)
+    rows = await data_service.fetch_daily_data(
+        ts_code, start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
+    )
+    if not rows:
+        return []
+    rows = sorted(rows, key=lambda x: x.get("trade_date", ""))
+    return [float(r["close"]) for r in rows if r.get("close")]
+
+
+async def run_lstm_forecast(ts_code: str, use_new: bool) -> Dict[str, Any]:
+    closes = await fetch_close_prices(ts_code)
+    if len(closes) < 30:
+        return {"available": False, "reason": "收盘价历史不足"}
+    predictor = get_lstm_predictor(use_new=use_new)
+    result = predictor.predict(closes)
+    result["model_variant"] = "new" if use_new else "legacy"
+    return result
+
+
 async def analyze_pe_pb(ts_code: str, time_range: str = "3y") -> Dict[str, Any]:
-    """基于 Tushare PE/PB 分位数的周期分析"""
+    """基于 Tushare PE/PB 分位数的周期分析 + LSTM 价格预测"""
     data_service = DataService()
     ts_code = normalize_ts_code(ts_code)
     days = TIME_RANGE_DAYS.get(time_range, 365 * 3)
@@ -122,8 +147,11 @@ async def analyze_pe_pb(ts_code: str, time_range: str = "3y") -> Dict[str, Any]:
     except Exception:
         pass
 
+    use_new = should_use_new_model(ts_code, NEW_MODEL_RATIO)
+    lstm_result = await run_lstm_forecast(ts_code, use_new=use_new)
+
     history_limit = min(len(pe_history), 500)
-    return {
+    response = {
         "ts_code": ts_code,
         "name": stock_name,
         "current_pe": round(current_pe, 2),
@@ -137,13 +165,31 @@ async def analyze_pe_pb(ts_code: str, time_range: str = "3y") -> Dict[str, Any]:
         "pe_history": pe_history[:history_limit],
         "pb_history": pb_history[:history_limit],
         "time_range": time_range,
-        "data_source": "Tushare估值数据",
+        "data_source": "Tushare估值数据 + LSTM周期模型",
+        "lstm_forecast": lstm_result,
+        "model_routing": {
+            "use_new_model": use_new,
+            "gray_ratio": NEW_MODEL_RATIO,
+            "variant": lstm_result.get("model_variant", "new"),
+        },
     }
+
+    if lstm_result.get("available"):
+        ci = lstm_result.get("confidence_interval", {})
+        response["price_forecast"] = {
+            "current_price": lstm_result.get("current_price"),
+            "predicted_prices": lstm_result.get("predicted_prices"),
+            "predicted_change_pct": lstm_result.get("change_pct"),
+            "trend": lstm_result.get("trend"),
+            "confidence_interval": ci,
+        }
+
+    return response
 
 
 @router.post("/analyze")
 async def analyze_cycle(data: CycleAnalysisInput, db: Session = Depends(get_db)):
-    """资产周期分析 - 基于 Tushare PE/PB 分位数"""
+    """资产周期分析 - PE/PB 分位 + LSTM 价格预测"""
     return await analyze_pe_pb(data.asset_code, data.time_range)
 
 
@@ -163,14 +209,25 @@ async def train_cycle_model(data: ModelTrainingInput, db: Session = Depends(get_
 
 @router.get("/forecast/{asset_code}")
 async def get_forecast(asset_code: str, days: int = 30, db: Session = Depends(get_db)):
-    ai_service = AIService()
-    result = await ai_service.analyze_cycle(asset_code)
-    if "error" in result:
-        raise HTTPException(status_code=400, detail=result["error"])
+    ts_code = normalize_ts_code(asset_code)
+    use_new = should_use_new_model(ts_code, NEW_MODEL_RATIO)
+    lstm_result = await run_lstm_forecast(ts_code, use_new=use_new)
+    if not lstm_result.get("available"):
+        ai_service = AIService()
+        result = await ai_service.analyze_cycle(asset_code)
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        return {
+            "asset_code": asset_code,
+            "forecast_days": days,
+            "forecast": result.get("lstm_forecast", {}),
+            "current_phase": result.get("current_phase"),
+            "recommendation": result.get("recommendation"),
+            "fallback": True,
+        }
     return {
         "asset_code": asset_code,
         "forecast_days": days,
-        "forecast": result.get("lstm_forecast", {}),
-        "current_phase": result.get("current_phase"),
-        "recommendation": result.get("recommendation"),
+        "forecast": lstm_result,
+        "model_variant": lstm_result.get("model_variant"),
     }

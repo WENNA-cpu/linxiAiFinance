@@ -1,0 +1,96 @@
+{
+  "active": {
+    "lstm_cycle": {
+      "version": "v20260605_192814",
+      "model_type": "lstm_cycle",
+      "path": "models\\versions\\lstm_cycle\\v20260605_192814\\lstm_cycle.h5",
+      "files": [
+        "E:\\linxiAiFinance\\backend\\models\\versions\\lstm_cycle\\v20260605_192814\\lstm_cycle.h5",
+        "E:\\linxiAiFinance\\backend\\models\\versions\\lstm_cycle\\v20260605_192814\\lstm_cycle_scaler.pkl",
+        "E:\\linxiAiFinance\\backend\\models\\versions\\lstm_cycle\\v20260605_192814\\lstm_loss_curve.png"
+      ],
+      "metrics": {
+        "train_samples": 7216,
+        "test_samples": 1804,
+        "epochs_trained": 8,
+        "final_loss": 0.0006939712911844254,
+        "final_val_loss": 0.0002641794562805444,
+        "model_path": "E:\\linxiAiFinance\\backend\\models\\lstm_cycle.h5",
+        "scaler_path": "E:\\linxiAiFinance\\backend\\models\\lstm_cycle_scaler.pkl",
+        "loss_plot": "E:\\linxiAiFinance\\backend\\models\\reports\\lstm_loss_curve.png"
+      },
+      "created_at": "2026-06-05T19:28:14.638030"
+    },
+    "rf_risk": {
+      "version": "v20260605_192852",
+      "model_type": "rf_risk",
+      "path": "models\\versions\\rf_risk\\v20260605_192852\\rf_risk.pkl",
+      "files": [
+        "E:\\linxiAiFinance\\backend\\models\\versions\\rf_risk\\v20260605_192852\\rf_risk.pkl",
+        "E:\\linxiAiFinance\\backend\\models\\versions\\rf_risk\\v20260605_192852\\rf_feature_importance.png"
+      ],
+      "metrics": {
+        "train_samples": 7120,
+        "test_samples": 1780,
+        "train_accuracy": 0.8570224719101124,
+        "test_accuracy": 0.43089887640449437,
+        "feature_importance": {
+          "volatility": 0.3167026823968285,
+          "turnover_rate": 0.23160341546201935,
+          "pe_percentile": 0.23831511946361328,
+          "volume_change_rate": 0.2133787826775388
+        },
+        "model_path": "E:\\linxiAiFinance\\backend\\models\\rf_risk.pkl",
+        "importance_plot": "E:\\linxiAiFinance\\backend\\models\\reports\\rf_feature_importance.png"
+      },
+      "created_at": "2026-06-05T19:28:52.854033"
+    }
+  },
+  "history": [
+    {
+      "version": "v20260605_192852",
+      "model_type": "rf_risk",
+      "path": "models\\versions\\rf_risk\\v20260605_192852\\rf_risk.pkl",
+      "files": [
+        "E:\\linxiAiFinance\\backend\\models\\versions\\rf_risk\\v20260605_192852\\rf_risk.pkl",
+        "E:\\linxiAiFinance\\backend\\models\\versions\\rf_risk\\v20260605_192852\\rf_feature_importance.png"
+      ],
+      "metrics": {
+        "train_samples": 7120,
+        "test_samples": 1780,
+        "train_accuracy": 0.8570224719101124,
+        "test_accuracy": 0.43089887640449437,
+        "feature_importance": {
+          "volatility": 0.3167026823968285,
+          "turnover_rate": 0.23160341546201935,
+          "pe_percentile": 0.23831511946361328,
+          "volume_change_rate": 0.2133787826775388
+        },
+        "model_path": "E:\\linxiAiFinance\\backend\\models\\rf_risk.pkl",
+        "importance_plot": "E:\\linxiAiFinance\\backend\\models\\reports\\rf_feature_importance.png"
+      },
+      "created_at": "2026-06-05T19:28:52.854033"
+    },
+    {
+      "version": "v20260605_192814",
+      "model_type": "lstm_cycle",
+      "path": "models\\versions\\lstm_cycle\\v20260605_192814\\lstm_cycle.h5",
+      "files": [
+        "E:\\linxiAiFinance\\backend\\models\\versions\\lstm_cycle\\v20260605_192814\\lstm_cycle.h5",
+        "E:\\linxiAiFinance\\backend\\models\\versions\\lstm_cycle\\v20260605_192814\\lstm_cycle_scaler.pkl",
+        "E:\\linxiAiFinance\\backend\\models\\versions\\lstm_cycle\\v20260605_192814\\lstm_loss_curve.png"
+      ],
+      "metrics": {
+        "train_samples": 7216,
+        "test_samples": 1804,
+        "epochs_trained": 8,
+        "final_loss": 0.0006939712911844254,
+        "final_val_loss": 0.0002641794562805444,
+        "model_path": "E:\\linxiAiFinance\\backend\\models\\lstm_cycle.h5",
+        "scaler_path": "E:\\linxiAiFinance\\backend\\models\\lstm_cycle_scaler.pkl",
+        "loss_plot": "E:\\linxiAiFinance\\backend\\models\\reports\\lstm_loss_curve.png"
+      },
+      "created_at": "2026-06-05T19:28:14.638030"
+    }
+  ]
+}

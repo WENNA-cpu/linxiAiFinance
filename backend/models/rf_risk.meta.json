@@ -1,0 +1,14 @@
+{
+  "train_samples": 7120,
+  "test_samples": 1780,
+  "train_accuracy": 0.8570224719101124,
+  "test_accuracy": 0.43089887640449437,
+  "feature_importance": {
+    "volatility": 0.3167026823968285,
+    "turnover_rate": 0.23160341546201935,
+    "pe_percentile": 0.23831511946361328,
+    "volume_change_rate": 0.2133787826775388
+  },
+  "model_path": "E:\\linxiAiFinance\\backend\\models\\rf_risk.pkl",
+  "importance_plot": "E:\\linxiAiFinance\\backend\\models\\reports\\rf_feature_importance.png"
+}
