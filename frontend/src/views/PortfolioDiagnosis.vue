@@ -26,280 +26,65 @@ const showFeedback = ref(false);
 const feedbackType = ref<'positive' | 'negative' | null>(null);
 const feedbackReason = ref('');
 const isLoading = ref(false);
+const diagnosisError = ref('');
 const diagnosisData = ref<any>(null);
+
+// 调用后端 API 获取诊断结果
+const fetchDiagnosis = async () => {
+  const assets = portfolioStore.portfolio.assets;
+  if (assets.length === 0) return;
+
+  isLoading.value = true;
+  diagnosisError.value = '';
+
+  try {
+    const totalValue = portfolioStore.portfolio.totalValue || 1;
+    const payload = {
+      assets: assets.map(a => ({
+        code: a.code,
+        name: a.name,
+        weight: a.marketValue / totalValue,
+        cost_price: a.costPrice,
+        current_price: a.currentPrice,
+      })),
+      total_value: portfolioStore.portfolio.totalValue,
+    };
+
+    const response = await fetch('/api/portfolio/diagnose', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const errBody = await response.json().catch(() => ({}));
+      throw new Error(errBody.detail || `诊断请求失败 (${response.status})`);
+    }
+
+    const data = await response.json();
+    diagnosisData.value = data;
+    localStorage.setItem(`diagnosis_${data.request_id}`, JSON.stringify(data));
+    localStorage.setItem('last_diagnosis_id', data.request_id);
+  } catch (err) {
+    diagnosisError.value = err instanceof Error ? err.message : '获取诊断结果失败';
+    diagnosisData.value = null;
+  } finally {
+    isLoading.value = false;
+  }
+};
 
 // 基于store判断是否有持仓数据
 const hasRealData = computed(() => portfolioStore.portfolio.assets.length > 0);
 
-// 前端生成诊断结果（不调用后端）
-const fetchDiagnosis = () => {
-  const assets = portfolioStore.portfolio.assets;
-  console.log('[诊断] 开始生成诊断数据，持仓资产:', assets);
-
-  if (assets.length === 0) {
-    console.log('[诊断] 无持仓数据，跳过');
-    return;
-  }
-
-  isLoading.value = true;
-
-  // 生成 request_id
-  const requestId = 'REQ-' + Date.now();
-
-  // 基于 assetAnalysis 计算的数据生成诊断结果
-  const analysis = assetAnalysis.value;
-  const totalAssets = analysis.length;
-  const riskAssets = analysis.filter((a: any) => a.returnRate < -5).length;
-  const opportunityAssets = analysis.filter((a: any) => a.returnRate > 5).length;
-  const avgReturn = analysis.reduce((sum: number, a: any) => sum + a.returnRate, 0) / (totalAssets || 1);
-
-  // 生成市场趋势结论
-  let marketTrend = '';
-  if (avgReturn > 1) {
-    marketTrend = `市场趋势向好，您的持仓整体上涨 ${avgReturn.toFixed(2)}%，表现优于大盘。建议关注盈利资产的持续性，同时注意风险控制。`;
-  } else if (avgReturn < -1) {
-    marketTrend = `市场趋势偏弱，您的持仓整体下跌 ${Math.abs(avgReturn).toFixed(2)}%。建议关注风险，可考虑适当调整仓位。`;
-  } else {
-    marketTrend = `市场震荡整理，您的持仓整体波动在 ${avgReturn.toFixed(2)}% 范围内，表现平稳。建议保持观望，精选个股。`;
-  }
-
-  // 生成板块轮动结论
-  const sectors: Record<string, number[]> = {};
-  analysis.forEach((a: any) => {
-    const sector = getSector(a.code);
-    if (!sectors[sector]) sectors[sector] = [];
-    sectors[sector].push(a.returnRate);
-  });
-  const sectorAvg = Object.entries(sectors).map(([name, rates]) => ({
-    name,
-    avg: rates.reduce((sum, r) => sum + r, 0) / rates.length,
-  }));
-  sectorAvg.sort((a, b) => b.avg - a.avg);
-
-  let sectorRotation = '';
-  if (sectorAvg.length > 1) {
-    sectorRotation = `您的持仓中，${sectorAvg[0].name} 板块表现较好（平均 ${sectorAvg[0].avg.toFixed(2)}%），${sectorAvg[sectorAvg.length - 1].name} 板块表现较弱（平均 ${sectorAvg[sectorAvg.length - 1].avg.toFixed(2)}%）。建议关注板块轮动机会。`;
-  } else if (sectorAvg.length === 1) {
-    sectorRotation = `您的持仓主要集中在 ${sectorAvg[0].name} 板块，平均涨跌幅 ${sectorAvg[0].avg.toFixed(2)}%。建议适当分散投资以降低风险。`;
-  } else {
-    sectorRotation = '暂无板块数据';
-  }
-
-  // 生成风险点
-  const riskPoints: string[] = [];
-  if (riskAssets > 0) {
-    const riskNames = analysis.filter((a: any) => a.returnRate < -5).slice(0, 3).map((a: any) => a.name).join('、');
-    riskPoints.push(`以下资产亏损超过5%：${riskNames}，建议关注止损时机`);
-  }
-  if (avgReturn < -5) {
-    riskPoints.push('整体持仓亏损较大，建议评估风险承受能力');
-  }
-  if (sectorAvg.length === 1) {
-    riskPoints.push('持仓过于集中，建议分散投资');
-  }
-  if (riskPoints.length === 0) {
-    riskPoints.push('当前持仓风险可控，建议持续关注市场变化');
-  }
-
-  // 生成机会点
-  const opportunities: string[] = [];
-  if (opportunityAssets > 0) {
-    const oppNames = analysis.filter((a: any) => a.returnRate > 5).slice(0, 3).map((a: any) => a.name).join('、');
-    opportunities.push(`以下资产盈利超过5%：${oppNames}，可考虑适当止盈`);
-  }
-  if (sectorAvg.length > 0 && sectorAvg[0].avg > 5) {
-    opportunities.push(`${sectorAvg[0].name} 板块表现强势，可关注相关机会`);
-  }
-  if (avgReturn > 5) {
-    opportunities.push('整体持仓盈利良好，可考虑部分获利了结');
-  }
-  if (opportunities.length === 0) {
-    opportunities.push('建议关注低估值优质资产的配置机会');
-  }
-
-  // 构建资产详情
-  const assetsDetail = analysis.map((a: any) => ({
-    code: a.code,
-    name: a.name,
-    weight: a.marketValue / (portfolioStore.portfolio.totalValue || 1),
-    cost_price: a.costPrice,
-    current_price: a.currentPrice,
-    profit_pct: a.returnRate,
-    data_source: a.dataSource || '前端计算',
-  }));
-
-  // 构建诊断数据
-  const data = {
-    request_id: requestId,
-    confidence: 85,
-    summary: {
-      total_assets: totalAssets,
-      risk_assets: riskAssets,
-      opportunity_assets: opportunityAssets,
-      time_saved: totalAssets * 5,
-    },
-    analysis: {
-      market_trend: marketTrend,
-      sector_rotation: sectorRotation,
-      risk_points: riskPoints,
-      opportunities: opportunities,
-    },
-    data_source: {
-      time_range: new Date().toLocaleDateString('zh-CN'),
-      sources: ['用户持仓数据', '前端计算'],
-      update_time: new Date().toLocaleString('zh-CN'),
-    },
-    detail: {
-      total_change_pct: avgReturn,
-      risk_assets_detail: analysis.filter((a: any) => a.returnRate < -5),
-      opportunity_assets_detail: analysis.filter((a: any) => a.returnRate > 5),
-      sector_performance: sectorAvg.reduce((acc, s) => ({ ...acc, [s.name]: s.avg }), {}),
-      assets: assetsDetail,
-    },
-  };
-
-  diagnosisData.value = data;
-
-  // 保存到 localStorage 供溯源页使用
-  localStorage.setItem(`diagnosis_${requestId}`, JSON.stringify(data));
-  localStorage.setItem('last_diagnosis_id', requestId);
-
-  console.log('[诊断] 生成数据完成:', data);
-  isLoading.value = false;
-};
-
-// 从store计算真实持仓数据（不依赖后端）
+// 从store计算真实持仓数据
 const storeAssets = computed(() => portfolioStore.portfolio.assets);
 const storeAssetCount = computed(() => storeAssets.value.length);
 
-// 根据股票代码判断板块
-const getSector = (code: string) => {
-  if (code.startsWith('6')) return '沪市主板';
-  if (code.startsWith('0')) return '深市主板';
-  if (code.startsWith('3')) return '创业板';
-  if (code.startsWith('68')) return '科创板';
-  return '其他';
-};
-
-// 计算平均涨跌幅（基于assetAnalysis的真实盈亏数据）
-const avgReturnRate = computed(() => {
-  const analysis = assetAnalysis.value;
-  if (analysis.length === 0) return 0;
-  const total = analysis.reduce((sum, a) => sum + a.returnRate, 0);
-  return total / analysis.length;
-});
-
-// 计算风险资产和机会资产（基于assetAnalysis的真实盈亏数据）
-const calculatedRiskAssets = computed(() => {
-  return assetAnalysis.value.filter(a => a.returnRate < -5);
-});
-
-const calculatedOpportunityAssets = computed(() => {
-  return assetAnalysis.value.filter(a => a.returnRate > 5);
-});
-
-// 计算板块表现（基于assetAnalysis的真实盈亏数据）
-const sectorPerformance = computed(() => {
-  const sectors: Record<string, number[]> = {};
-  assetAnalysis.value.forEach(a => {
-    const sector = getSector(a.code);
-    if (!sectors[sector]) sectors[sector] = [];
-    sectors[sector].push(a.returnRate);
-  });
-
-  const result: Record<string, number> = {};
-  Object.entries(sectors).forEach(([sector, rates]) => {
-    result[sector] = rates.reduce((a, b) => a + b, 0) / rates.length;
-  });
-  return result;
-});
-
-// 生成市场趋势结论
-const generateMarketTrend = () => {
-  const avg = avgReturnRate.value;
-  if (avg > 1) {
-    return `市场趋势向好，您的持仓整体上涨 ${avg.toFixed(2)}%，表现优于大盘。建议关注盈利资产的持续性，同时注意风险控制。`;
-  } else if (avg < -1) {
-    return `市场趋势偏弱，您的持仓整体下跌 ${Math.abs(avg).toFixed(2)}%。建议关注风险，可考虑适当调整仓位。`;
-  } else {
-    return `市场震荡整理，您的持仓整体波动在 ${avg.toFixed(2)}% 范围内，表现平稳。建议保持观望，精选个股。`;
-  }
-};
-
-// 生成板块轮动结论
-const generateSectorRotation = () => {
-  const sectors = sectorPerformance.value;
-  const entries = Object.entries(sectors);
-  if (entries.length === 0) return '暂无板块数据';
-
-  entries.sort((a, b) => b[1] - a[1]);
-  const best = entries[0];
-  const worst = entries[entries.length - 1];
-
-  if (entries.length === 1) {
-    return `您的持仓主要集中在${best[0]}，平均涨跌幅 ${best[1].toFixed(2)}%。建议适当分散投资以降低风险。`;
-  }
-  return `您的持仓中，${best[0]} 板块表现较好（平均 ${best[1].toFixed(2)}%），${worst[0]} 板块表现较弱（平均 ${worst[1].toFixed(2)}%）。建议关注板块轮动机会。`;
-};
-
-// 生成风险点
-const generateRiskPoints = () => {
-  const points: string[] = [];
-  const riskList = calculatedRiskAssets.value;
-
-  if (riskList.length > 0) {
-    const names = riskList.slice(0, 3).map(a => a.name).join('、');
-    points.push(`以下资产亏损超过5%：${names}，建议关注止损时机`);
-  }
-  if (avgReturnRate.value < -5) {
-    points.push('整体持仓亏损较大，建议评估风险承受能力');
-  }
-  if (Object.keys(sectorPerformance.value).length === 1) {
-    points.push('持仓过于集中，建议分散投资');
-  }
-  if (points.length === 0) {
-    points.push('当前持仓风险可控，建议持续关注市场变化');
-  }
-  return points;
-};
-
-// 生成机会点
-const generateOpportunities = () => {
-  const points: string[] = [];
-  const oppList = calculatedOpportunityAssets.value;
-
-  if (oppList.length > 0) {
-    const names = oppList.slice(0, 3).map(a => a.name).join('、');
-    points.push(`以下资产盈利超过5%：${names}，可考虑适当止盈`);
-  }
-
-  const sectors = sectorPerformance.value;
-  const entries = Object.entries(sectors);
-  if (entries.length > 0) {
-    entries.sort((a, b) => b[1] - a[1]);
-    if (entries[0][1] > 5) {
-      points.push(`${entries[0][0]} 板块表现强势，可关注相关机会`);
-    }
-  }
-
-  if (avgReturnRate.value > 5) {
-    points.push('整体持仓盈利良好，可考虑部分获利了结');
-  }
-  if (points.length === 0) {
-    points.push('建议关注低估值优质资产的配置机会');
-  }
-  return points;
-};
-
-// 诊断结果
+// 诊断结果（优先使用后端 API 数据）
 const diagnosisResult = computed(() => {
-  // 优先使用store中的持仓数据
-  const assetCount = storeAssetCount.value;
-
-  // 无持仓数据时返回默认值
-  if (assetCount === 0) {
+  if (storeAssetCount.value === 0) {
     return {
-      requestId: 'REQ-' + Date.now(),
+      requestId: '-',
       confidence: 0,
       summary: {
         totalAssets: 0,
@@ -316,32 +101,47 @@ const diagnosisResult = computed(() => {
       dataSource: {
         timeRange: '-',
         sources: [],
-        updateTime: new Date().toLocaleString('zh-CN'),
+        updateTime: '-',
       },
     };
   }
 
-  // 有持仓数据，直接在前端计算分析结论
+  if (diagnosisData.value) {
+    const d = diagnosisData.value;
+    return {
+      requestId: d.request_id,
+      confidence: d.confidence,
+      summary: {
+        totalAssets: d.summary.total_assets,
+        riskAssets: d.summary.risk_assets,
+        opportunityAssets: d.summary.opportunity_assets,
+        timeSaved: d.summary.time_saved,
+      },
+      analysis: {
+        marketTrend: d.analysis.market_trend,
+        sectorRotation: d.analysis.sector_rotation,
+        riskPoints: d.analysis.risk_points,
+        opportunities: d.analysis.opportunities,
+      },
+      dataSource: {
+        timeRange: d.data_source.time_range,
+        sources: d.data_source.sources,
+        updateTime: d.data_source.update_time,
+      },
+    };
+  }
+
   return {
-    requestId: diagnosisData.value?.request_id || 'REQ-' + Date.now(),
-    confidence: 85,
-    summary: {
-      totalAssets: assetCount,
-      riskAssets: calculatedRiskAssets.value.length,
-      opportunityAssets: calculatedOpportunityAssets.value.length,
-      timeSaved: assetCount * 5,
-    },
+    requestId: '-',
+    confidence: 0,
+    summary: { totalAssets: storeAssetCount.value, riskAssets: 0, opportunityAssets: 0, timeSaved: 0 },
     analysis: {
-      marketTrend: generateMarketTrend(),
-      sectorRotation: generateSectorRotation(),
-      riskPoints: generateRiskPoints(),
-      opportunities: generateOpportunities(),
+      marketTrend: isLoading.value ? '正在分析...' : '暂无诊断数据',
+      sectorRotation: isLoading.value ? '正在分析...' : '暂无诊断数据',
+      riskPoints: [],
+      opportunities: [],
     },
-    dataSource: {
-      timeRange: new Date().toLocaleDateString('zh-CN'),
-      sources: ['用户持仓数据'],
-      updateTime: new Date().toLocaleString('zh-CN'),
-    },
+    dataSource: { timeRange: '-', sources: [], updateTime: '-' },
   };
 });
 
@@ -356,53 +156,29 @@ interface BackendAsset {
   data_source?: string;
 }
 
-// 模拟真实股价数据（用于演示）
-const MOCK_REAL_PRICES: Record<string, number> = {
-  '000001': 11.08,    // 平安银行
-  '000001.SZ': 11.08,
-  '600519': 1307.22,  // 贵州茅台
-  '600519.SH': 1307.22,
-  '510050': 2.63,     // 上证50ETF
-  '510050.SH': 2.63,
-};
-
 const assetAnalysis = computed(() => {
   const assets = portfolioStore.portfolio.assets;
   if (assets.length === 0) {
     return [];
   }
 
-  // 优先使用后端返回的真实盈亏数据
   const backendAssets: BackendAsset[] = diagnosisData.value?.detail?.assets || [];
   const backendAssetsMap = new Map(backendAssets.map((a) => [a.code, a]));
 
   return assets.map(asset => {
     const backendAsset = backendAssetsMap.get(asset.code);
-
-    // 优先使用后端返回的盈亏百分比
-    if (backendAsset?.profit_pct !== undefined) {
-      return {
-        ...asset,
-        returnRate: backendAsset.profit_pct,
-        dataSource: backendAsset.data_source || 'Tushare实时行情',
-        tradeDate: backendAsset.trade_date,
-        riskLevel: Math.random() > 0.5 ? 'high' : Math.random() > 0.5 ? 'medium' : 'low',
-        trend: backendAsset.profit_pct >= 0 ? 'up' : 'down',
-      };
-    }
-
-    // 后端无数据，使用模拟真实价格计算盈亏
-    const realPrice = MOCK_REAL_PRICES[asset.code] || asset.currentPrice;
-    const profitPct = asset.costPrice > 0 && realPrice > 0
-      ? ((realPrice - asset.costPrice) / asset.costPrice) * 100
-      : 0;
+    const profitPct = backendAsset?.profit_pct ?? (
+      asset.costPrice > 0 && asset.currentPrice > 0
+        ? ((asset.currentPrice - asset.costPrice) / asset.costPrice) * 100
+        : 0
+    );
 
     return {
       ...asset,
       returnRate: profitPct,
-      dataSource: '模拟行情数据',
-      tradeDate: '2026-06-02',
-      riskLevel: Math.random() > 0.5 ? 'high' : Math.random() > 0.5 ? 'medium' : 'low',
+      dataSource: backendAsset?.data_source || '用户持仓数据',
+      tradeDate: backendAsset?.trade_date || '',
+      riskLevel: profitPct < -5 ? 'high' : profitPct > 5 ? 'low' : 'medium',
       trend: profitPct >= 0 ? 'up' : 'down',
     };
   });
@@ -499,6 +275,10 @@ onMounted(() => {
             </button>
           </div>
         </div>
+      </div>
+
+      <div v-if="diagnosisError" class="bg-red-50 border border-red-200 rounded-xl p-4 mb-8 text-red-700">
+        {{ diagnosisError }}
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">

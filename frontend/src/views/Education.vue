@@ -1,8 +1,12 @@
-<script setup lang="ts">
+const isLoading = ref(true);
+const loadError = ref('');
+const showServiceModal = ref(false);
+
+const categories = [<script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { usePortfolioStore } from '@/stores/portfolio';
-import { coursesData, type CourseContent } from '@/data/courses';
+import { coursesData } from '@/data/courses';
 import RiskBanner from '@/components/RiskBanner.vue';
 import HomeIcon from '@/components/icons/HomeIcon.vue';
 import BookIcon from '@/components/icons/BookIcon.vue';
@@ -13,13 +17,76 @@ import StarIcon from '@/components/icons/StarIcon.vue';
 import LockIcon from '@/components/icons/LockIcon.vue';
 import ArrowRightIcon from '@/components/icons/ArrowRightIcon.vue';
 import PlayIcon from '@/components/icons/PlayIcon.vue';
+import EducationChatPanel from '@/components/EducationChatPanel.vue';
 
 const router = useRouter();
 const portfolioStore = usePortfolioStore();
 
+interface CourseContent {
+  id: number;
+  title: string;
+  category: string;
+  categoryName?: string;
+  level: string;
+  duration: string;
+  completed: boolean;
+  recommended: boolean;
+  description: string;
+  section_count?: number;
+}
+
 const selectedCategory = ref('all');
 const courses = ref<CourseContent[]>([]);
 const completedCourses = ref<Set<number>>(new Set());
+const isLoading = ref(true);
+const loadError = ref('');
+const showServiceModal = ref(false);
+
+const mapLocalCourses = (): CourseContent[] =>
+  coursesData.map(c => ({
+    id: c.id,
+    title: c.title,
+    category: c.category,
+    categoryName: c.categoryName,
+    level: c.level,
+    duration: c.duration,
+    completed: c.completed,
+    recommended: c.recommended,
+    description: c.description,
+    section_count: c.sections?.length ?? 0,
+  }));
+
+const applyCourses = (list: CourseContent[]) => {
+  courses.value = list;
+  loadCompletedStatus();
+};
+
+const fetchCourses = async () => {
+  isLoading.value = true;
+  loadError.value = '';
+
+  try {
+    const response = await fetch('/api/education/courses');
+    if (response.ok) {
+      const data = await response.json();
+      const apiCourses: CourseContent[] = (data.courses || []).map((c: CourseContent) => ({
+        ...c,
+        completed: false,
+      }));
+      if (apiCourses.length > 0) {
+        applyCourses(apiCourses);
+        return;
+      }
+    }
+    throw new Error('接口未返回课程数据');
+  } catch (err) {
+    console.warn('[Education] API 加载失败，使用本地课程数据:', err);
+    loadError.value = '在线课程加载失败，已展示本地课程';
+    applyCourses(mapLocalCourses());
+  } finally {
+    isLoading.value = false;
+  }
+};
 
 const categories = [
   { id: 'all', name: '全部' },
@@ -29,6 +96,30 @@ const categories = [
   { id: 'portfolio', name: '资产配置' },
   { id: 'risk', name: '风险管理' },
 ];
+
+const premiumServices = [
+  {
+    title: '深度研报解读',
+    price: '99元/月',
+    features: ['每日3篇精选研报', 'AI智能摘要', '核心观点提取'],
+    icon: BookIcon,
+  },
+  {
+    title: '持仓再平衡建议',
+    price: '199元/次',
+    features: ['个性化调仓方案', '风险评估报告', '执行步骤指导'],
+    icon: GraduationCapIcon,
+  },
+  {
+    title: '专家复核',
+    price: '299元/次',
+    features: ['资深投顾1对1', '视频诊断报告', '持续跟踪服务'],
+    icon: StarIcon,
+  },
+] as const;
+
+type PremiumService = (typeof premiumServices)[number];
+const selectedService = ref<PremiumService | null>(null);
 
 // 从持仓推断用户持有的资产类型
 const userHoldings = computed(() => {
@@ -60,8 +151,7 @@ const saveCompletedStatus = () => {
 
 onMounted(() => {
   portfolioStore.loadPortfolio();
-  courses.value = coursesData;
-  loadCompletedStatus();
+  fetchCourses();
 });
 
 const filteredCourses = computed(() => {
@@ -86,26 +176,15 @@ const startCourse = (courseId: number) => {
   router.push(`/course/${courseId}`);
 };
 
-const premiumServices = [
-  {
-    title: '深度研报解读',
-    price: '99元/月',
-    features: ['每日3篇精选研报', 'AI智能摘要', '核心观点提取'],
-    icon: BookIcon,
-  },
-  {
-    title: '持仓再平衡建议',
-    price: '199元/次',
-    features: ['个性化调仓方案', '风险评估报告', '执行步骤指导'],
-    icon: GraduationCapIcon,
-  },
-  {
-    title: '专家复核',
-    price: '299元/次',
-    features: ['资深投顾1对1', '视频诊断报告', '持续跟踪服务'],
-    icon: StarIcon,
-  },
-];
+const openPremiumService = (service: PremiumService) => {
+  selectedService.value = service;
+  showServiceModal.value = true;
+};
+
+const closePremiumService = () => {
+  showServiceModal.value = false;
+  selectedService.value = null;
+};
 </script>
 
 <template>
@@ -122,6 +201,15 @@ const premiumServices = [
     </header>
 
     <main class="max-w-7xl mx-auto px-4 py-8">
+      <div v-if="loadError" class="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-8 text-amber-800 text-sm">
+        {{ loadError }}
+      </div>
+
+      <div v-if="isLoading" class="flex items-center justify-center py-16 text-slate-500">
+        加载课程中...
+      </div>
+
+      <template v-else>
       <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-4 mb-8">
         <div class="flex items-center gap-3">
           <GraduationCapIcon class="w-6 h-6 text-emerald-600" />
@@ -149,7 +237,10 @@ const premiumServices = [
 
       <div class="mb-8">
         <h2 class="text-lg font-semibold text-slate-900 mb-4">为您推荐</h2>
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div v-if="recommendedCourses.length === 0" class="text-sm text-slate-500 py-8 text-center bg-white rounded-xl border border-slate-200">
+          暂无推荐课程，请查看下方全部课程
+        </div>
+        <div v-else class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           <div
             v-for="course in recommendedCourses"
             :key="course.id"
@@ -202,6 +293,9 @@ const premiumServices = [
           </button>
         </div>
         <div class="space-y-3">
+          <div v-if="filteredCourses.length === 0" class="text-sm text-slate-500 py-8 text-center">
+            该分类下暂无课程
+          </div>
           <div
             v-for="course in filteredCourses"
             :key="course.id"
@@ -240,8 +334,10 @@ const premiumServices = [
           </div>
         </div>
       </div>
+      </template>
 
-      <div class="bg-gradient-to-r from-indigo-600 to-purple-600 rounded-xl p-6 text-white">
+      <!-- 增值服务：始终展示 -->
+      <div class="bg-gradient-to-r from-indigo-600 to-purple-600 rounded-xl p-6 text-white mt-8">
         <div class="flex items-center gap-2 mb-4">
           <LockIcon class="w-5 h-5" />
           <h2 class="text-lg font-semibold">解锁高级功能</h2>
@@ -250,27 +346,77 @@ const premiumServices = [
           <div
             v-for="service in premiumServices"
             :key="service.title"
-            class="bg-white/10 rounded-lg p-4 backdrop-blur"
+            class="bg-white/10 rounded-lg p-4 backdrop-blur hover:bg-white/20 transition-colors"
           >
             <div class="flex items-center gap-2 mb-2">
               <component :is="service.icon" class="w-5 h-5" />
               <h3 class="font-medium">{{ service.title }}</h3>
             </div>
             <p class="text-2xl font-bold mb-3">{{ service.price }}</p>
-            <ul class="space-y-1 text-sm text-indigo-100">
+            <ul class="space-y-1 text-sm text-indigo-100 mb-4">
               <li v-for="feature in service.features" :key="feature" class="flex items-center gap-1">
-                <CheckCircleIcon class="w-3 h-3" />
+                <CheckCircleIcon class="w-3 h-3 flex-shrink-0" />
                 {{ feature }}
               </li>
             </ul>
-            <button class="w-full mt-4 py-2 bg-white text-indigo-600 rounded-lg font-medium hover:bg-indigo-50 transition-colors flex items-center justify-center gap-1">
+            <button
+              @click="openPremiumService(service)"
+              class="w-full py-2 bg-white text-indigo-600 rounded-lg font-medium hover:bg-indigo-50 transition-colors flex items-center justify-center gap-1"
+            >
               了解详情
               <ArrowRightIcon class="w-4 h-4" />
             </button>
           </div>
         </div>
       </div>
+
+      <!-- 增值服务详情弹窗 -->
+      <div
+        v-if="showServiceModal && selectedService"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+        @click.self="closePremiumService"
+      >
+        <div class="bg-white rounded-2xl shadow-xl max-w-md w-full p-6">
+          <div class="flex items-center gap-3 mb-4">
+            <component :is="selectedService.icon" class="w-8 h-8 text-indigo-600" />
+            <div>
+              <h3 class="text-lg font-bold text-slate-900">{{ selectedService.title }}</h3>
+              <p class="text-indigo-600 font-semibold">{{ selectedService.price }}</p>
+            </div>
+          </div>
+          <ul class="space-y-2 mb-6">
+            <li
+              v-for="feature in selectedService.features"
+              :key="feature"
+              class="flex items-center gap-2 text-sm text-slate-600"
+            >
+              <CheckCircleIcon class="w-4 h-4 text-emerald-500 flex-shrink-0" />
+              {{ feature }}
+            </li>
+          </ul>
+          <p class="text-xs text-slate-400 mb-4">
+            增值服务即将上线，敬请期待。如需咨询请联系客服。
+          </p>
+          <div class="flex gap-3">
+            <button
+              @click="closePremiumService"
+              class="flex-1 py-2 border border-slate-200 rounded-lg text-slate-600 hover:bg-slate-50"
+            >
+              关闭
+            </button>
+            <button
+              @click="closePremiumService"
+              class="flex-1 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"
+            >
+              预约咨询
+            </button>
+          </div>
+        </div>
+      </div>
     </main>
+
+    <!-- AI 问答助手：右下角浮动按钮，点击弹出 -->
+    <EducationChatPanel />
 
     <footer class="bg-white border-t border-slate-200 py-6">
       <div class="max-w-7xl mx-auto px-4 text-center">

@@ -9,6 +9,7 @@
     "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.106.2",
     "vue": "^3.4.0",
     "vue-router": "^4.3.0",
     "pinia": "^2.1.7",

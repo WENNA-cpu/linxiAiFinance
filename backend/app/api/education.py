@@ -1,54 +1,79 @@
-from fastapi import APIRouter, Depends, Path
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import Optional, List
+from pydantic import BaseModel, Field
 
 from app.models.database import get_db
+from app.services.education_service import list_courses, get_course
+from app.services.deepseek_service import answer_education_question
 
 router = APIRouter()
 
 
-@router.get("/{asset_type}")
-async def get_education_content(
-    asset_type: str = Path(..., description="资产类型: stock/fund/bond/portfolio/risk"),
+class ChatMessage(BaseModel):
+    role: str = Field(..., description="user 或 assistant")
+    content: str
+
+
+class ChatRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=500, description="用户问题")
+    history: Optional[List[ChatMessage]] = Field(default=None, description="对话历史")
+
+
+class ChatResponse(BaseModel):
+    answer: str
+    model: str = "deepseek-chat"
+
+
+@router.post("/chat", response_model=ChatResponse)
+async def education_chat(body: ChatRequest):
+    """投教 AI 问答助手"""
+    question = body.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="问题不能为空")
+
+    history = [{"role": m.role, "content": m.content} for m in (body.history or [])]
+
+    try:
+        answer = await answer_education_question(question, history)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI 问答服务异常: {str(e)[:100]}")
+
+    return ChatResponse(answer=answer)
+
+@router.get("/courses")
+async def get_courses(
+    category: Optional[str] = Query("all", description="课程分类"),
     db: Session = Depends(get_db),
 ):
-    """获取投教内容"""
-    courses = [
-        {
-            "id": 1,
-            "title": "股票估值基础：PE/PB指标详解",
-            "category": "stock",
-            "level": "入门",
-            "duration": "15分钟",
-            "completed": True,
-            "recommended": True,
-            "description": "学习市盈率(PE)和市净率(PB)的基本概念及应用场景",
-        },
-        {
-            "id": 2,
-            "title": "基金定投策略实战",
-            "category": "fund",
-            "level": "进阶",
-            "duration": "25分钟",
-            "completed": False,
-            "recommended": True,
-            "description": "掌握定投的核心逻辑，学会制定适合自己的定投计划",
-        },
-        {
-            "id": 3,
-            "title": "资产配置的四个维度",
-            "category": "portfolio",
-            "level": "进阶",
-            "duration": "30分钟",
-            "completed": False,
-            "recommended": False,
-            "description": "从风险、收益、流动性、时间四个维度构建投资组合",
-        },
-    ]
+    """获取投教课程列表"""
+    courses = list_courses(None if category in (None, "all") else category)
+    return {
+        "category": category or "all",
+        "courses": courses,
+        "total": len(courses),
+        "data_source": "投教知识库",
+    }
 
-    if asset_type != "all":
-        courses = [c for c in courses if c["category"] == asset_type]
 
+@router.get("/courses/{course_id}")
+async def get_course_detail(course_id: int, db: Session = Depends(get_db)):
+    """获取课程详情"""
+    course = get_course(course_id)
+    if not course:
+        raise HTTPException(status_code=404, detail=f"未找到课程 {course_id}")
+    return course
+
+
+@router.get("/{asset_type}")
+async def get_education_content(
+    asset_type: str,
+    db: Session = Depends(get_db),
+):
+    """按资产类型获取投教内容（兼容旧接口）"""
+    courses = list_courses(None if asset_type == "all" else asset_type)
     return {
         "asset_type": asset_type,
         "courses": courses,

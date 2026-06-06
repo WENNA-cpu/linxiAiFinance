@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import { getSupabaseUrl } from '@/supabase/client';
 import RiskBanner from '@/components/RiskBanner.vue';
 import HomeIcon from '@/components/icons/HomeIcon.vue';
 import CheckCircleIcon from '@/components/icons/CheckCircleIcon.vue';
@@ -20,13 +19,15 @@ const router = useRouter();
 const loading = ref(false);
 const error = ref('');
 
-// 合规统计数据（从后端获取）
-const stats = ref({
+const DEFAULT_STATS = {
   blocked_count: 2847,
   hallucination_correction_rate: 94.2,
   data_breach_events: 0,
   rule_pass_rate: 99.8,
-});
+};
+
+const stats = ref({ ...DEFAULT_STATS });
+const isDefaultData = ref(false);
 
 // 从后端 API 获取合规统计数据
 const fetchComplianceStats = async () => {
@@ -34,11 +35,9 @@ const fetchComplianceStats = async () => {
   error.value = '';
 
   try {
-    const response = await fetch(`${getSupabaseUrl()}/functions/v1/compliance-stats/compliance-stats`, {
+    const response = await fetch('/api/admin/compliance-stats', {
       method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
     });
 
     if (!response.ok) {
@@ -47,21 +46,16 @@ const fetchComplianceStats = async () => {
 
     const data = await response.json();
     stats.value = {
-      blocked_count: data.blocked_count || 2847,
-      hallucination_correction_rate: data.hallucination_correction_rate || 94.2,
-      data_breach_events: data.data_breach_events || 0,
-      rule_pass_rate: data.rule_pass_rate || 99.8,
+      blocked_count: data.blocked_count ?? DEFAULT_STATS.blocked_count,
+      hallucination_correction_rate: data.hallucination_correction_rate ?? DEFAULT_STATS.hallucination_correction_rate,
+      data_breach_events: data.data_breach_events ?? DEFAULT_STATS.data_breach_events,
+      rule_pass_rate: data.rule_pass_rate ?? DEFAULT_STATS.rule_pass_rate,
     };
+    isDefaultData.value = Boolean(data.is_default);
   } catch (err) {
     error.value = err instanceof Error ? err.message : '获取统计数据失败';
-    console.error('获取合规统计数据失败:', err);
-    // 使用默认值
-    stats.value = {
-      blocked_count: 2847,
-      hallucination_correction_rate: 94.2,
-      data_breach_events: 0,
-      rule_pass_rate: 99.8,
-    };
+    stats.value = { ...DEFAULT_STATS };
+    isDefaultData.value = true;
   } finally {
     loading.value = false;
   }

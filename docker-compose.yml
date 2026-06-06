@@ -9,6 +9,7 @@ services:
       - "80:80"
     depends_on:
       - backend
+    restart: unless-stopped
     networks:
       - lingxi-network
 
@@ -19,14 +20,21 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=sqlite:///./lingxi.db
-      - SECRET_KEY=${SECRET_KEY:-your-secret-key-here}
+      - DATABASE_URL=sqlite:////app/persist/lingxi.db
+      - SECRET_KEY=${SECRET_KEY:-lingxi-prod-secret-change-me}
       - TUSHARE_TOKEN=${TUSHARE_TOKEN:-}
-      - MEOO_PROJECT_API_KEY=${MEOO_PROJECT_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - NEW_MODEL_RATIO=${NEW_MODEL_RATIO:-5}
     volumes:
-      - ./backend/data:/app/data
+      - lingxi-db:/app/persist
+      - ./backend/models:/app/models:ro
+      - ./backend/data:/app/data:ro
+    restart: unless-stopped
     networks:
       - lingxi-network
+
+volumes:
+  lingxi-db:
 
 networks:
   lingxi-network:

@@ -1,3 +1,5 @@
+from app.core import env_loader  # noqa: F401 — 最先加载 .env
+
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager

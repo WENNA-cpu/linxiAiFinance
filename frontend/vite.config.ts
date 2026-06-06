@@ -21,6 +21,12 @@ export default defineConfig({
     strictPort: true,
     allowedHosts: true,
     hmr: false,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+    },
   },
   base: './',
   build: {

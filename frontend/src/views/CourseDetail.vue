@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { getCourseById, type CourseContent } from '@/data/courses';
+import { getCourseById } from '@/data/courses';
 import RiskBanner from '@/components/RiskBanner.vue';
 import HomeIcon from '@/components/icons/HomeIcon.vue';
 import BookIcon from '@/components/icons/BookIcon.vue';
@@ -15,7 +15,28 @@ import ArrowLeftIcon from '@/components/icons/ArrowLeftIcon.vue';
 const router = useRouter();
 const route = useRoute();
 
+interface CourseSection {
+  id: string;
+  title: string;
+  content: string;
+  keyPoints?: string[];
+  example?: { title: string; content: string };
+}
+
+interface CourseContent {
+  id: number;
+  title: string;
+  category: string;
+  categoryName?: string;
+  level: string;
+  duration: string;
+  description: string;
+  sections: CourseSection[];
+}
+
 const course = ref<CourseContent | null>(null);
+const isLoading = ref(true);
+const loadError = ref('');
 const currentSectionIndex = ref(0);
 const completedSections = ref<Set<string>>(new Set());
 const isCompleted = ref(false);
@@ -42,11 +63,40 @@ const saveProgress = () => {
   }));
 };
 
+const fetchCourse = async (courseId: number) => {
+  isLoading.value = true;
+  loadError.value = '';
+  try {
+    const response = await fetch(`/api/education/courses/${courseId}`);
+    if (response.ok) {
+      course.value = await response.json();
+      loadProgress();
+      return;
+    }
+    throw new Error(`API ${response.status}`);
+  } catch (err) {
+    console.warn('[CourseDetail] API 失败，使用本地数据:', err);
+    const local = getCourseById(courseId);
+    if (local) {
+      course.value = local;
+      loadProgress();
+    } else {
+      loadError.value = '未找到该课程';
+      course.value = null;
+    }
+  } finally {
+    isLoading.value = false;
+  }
+};
+
 onMounted(() => {
   const courseId = parseInt(route.params.id as string);
-  const foundCourse = getCourseById(courseId);
-  course.value = foundCourse || null;
-  loadProgress();
+  if (Number.isNaN(courseId)) {
+    loadError.value = '无效的课程 ID';
+    isLoading.value = false;
+    return;
+  }
+  fetchCourse(courseId);
 });
 
 const currentSection = computed(() => {
