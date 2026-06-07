@@ -9,7 +9,6 @@
     "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.106.2",
     "crypto-js": "^4.2.0",
     "date-fns": "^2.30.0",
     "echarts": "^5.4.3",
