@@ -2,7 +2,7 @@
 import { ref, onMounted, computed, watch } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import RiskBanner from '@/components/RiskBanner.vue';
-import DataLineageChart from '@/components/DataLineageChart.vue';
+import DataLineageChart, { type LineageStep } from '@/components/DataLineageChart.vue';
 import HomeIcon from '@/components/icons/HomeIcon.vue';
 import ArrowRightIcon from '@/components/icons/ArrowRightIcon.vue';
 import ClockIcon from '@/components/icons/ClockIcon.vue';
@@ -38,6 +38,7 @@ interface TraceData {
   message?: string;
   generated_at?: string;
   logs: TraceLog[];
+  steps?: LineageStep[];
   summary: {
     total_steps: number;
     success_steps: number;
@@ -51,26 +52,9 @@ interface TraceData {
   rule_checks?: string[];
   is_mock?: boolean;
   error_detail?: string;
-  lineage?: LineageData;
-}
-
-interface LineageNode {
-  name: string;
-  category: string;
-}
-
-interface LineageLink {
-  source: string;
-  target: string;
-}
-
-interface LineageData {
-  nodes: LineageNode[];
-  links: LineageLink[];
 }
 
 const traceData = ref<TraceData | null>(null);
-const lineageData = ref<LineageData | null>(null);
 const isLineageLoading = ref(true);
 
 // 格式化时间
@@ -165,6 +149,47 @@ const ruleChecks = computed(() => {
     }));
 });
 
+// 将审计日志映射为血缘图 steps 格式
+const mapLogToLineageStep = (log: TraceLog): LineageStep => {
+  let step_status: LineageStep['step_status'];
+  if (log.step_status === '失败') {
+    step_status = 'failed';
+  } else if (log.step_status === '成功' || log.step_status === '警告') {
+    step_status = 'success';
+  } else if (!log.completed_at) {
+    step_status = 'running';
+  } else {
+    step_status = 'success';
+  }
+
+  let duration_ms: number | undefined;
+  if (log.started_at && log.completed_at) {
+    duration_ms = Math.max(
+      0,
+      new Date(log.completed_at).getTime() - new Date(log.started_at).getTime(),
+    );
+  }
+
+  return {
+    step_name: log.step_name,
+    step_status,
+    step_detail: log.step_detail,
+    duration_ms,
+  };
+};
+
+const lineageSteps = computed((): LineageStep[] | null => {
+  if (traceData.value?.steps?.length) {
+    return traceData.value.steps;
+  }
+  if (traceData.value?.logs?.length) {
+    return traceData.value.logs.map(mapLogToLineageStep);
+  }
+  return null;
+});
+
+const isDemoLineage = computed(() => !lineageSteps.value?.length);
+
 // 审计日志列表（按步骤顺序排列）
 const auditLogs = computed(() => {
   if (!traceData.value?.logs) return [];
@@ -208,11 +233,9 @@ const fetchTraceData = async () => {
     }
     const data = await response.json();
     traceData.value = data;
-    lineageData.value = data.lineage || null;
   } catch (err) {
     error.value = err instanceof Error ? err.message : '获取溯源信息失败';
     traceData.value = null;
-    lineageData.value = null;
   } finally {
     isLoading.value = false;
     isLineageLoading.value = false;
@@ -340,21 +363,24 @@ watch(
             暂无审计日志
           </div>
           <div v-else class="relative">
+            <!-- 贯穿所有步骤的竖线 -->
+            <div
+              v-if="processingTimeline.length > 1"
+              class="absolute left-4 w-0.5 bg-slate-200 -translate-x-1/2 pointer-events-none"
+              style="top: 16px; bottom: 16px"
+            />
             <div
               v-for="log in processingTimeline"
               :key="log.step"
-              class="flex gap-4 pb-6 last:pb-0"
+              class="flex gap-4 pb-5 last:pb-0"
             >
-              <div class="flex flex-col items-center flex-shrink-0">
-                <div
-                  class="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white"
-                  :class="log.status === '成功' ? 'bg-emerald-500' : log.status === '失败' ? 'bg-red-500' : 'bg-amber-500'"
-                >
-                  {{ log.step }}
-                </div>
-                <div v-if="log.step < processingTimeline.length" class="w-0.5 flex-1 bg-slate-200 mt-2 min-h-[24px]" />
+              <div
+                class="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white flex-shrink-0 relative z-10"
+                :class="log.status === '成功' ? 'bg-emerald-500' : log.status === '失败' ? 'bg-red-500' : 'bg-amber-500'"
+              >
+                {{ log.step }}
               </div>
-              <div class="flex-1 min-w-0 pb-2">
+              <div class="flex-1 min-w-0 pt-0.5">
                 <div class="flex flex-wrap items-center gap-2 mb-1">
                   <span class="font-medium text-slate-900">{{ log.action }}</span>
                   <span class="text-xs px-2 py-0.5 rounded-full" :class="statusBadgeClass(log.status)">
@@ -524,7 +550,11 @@ watch(
           <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-indigo-600"></div>
           <span class="ml-2 text-sm text-slate-500">加载血缘数据...</span>
         </div>
-        <DataLineageChart v-else :data="lineageData" />
+        <DataLineageChart
+          v-else
+          :steps="lineageSteps"
+          :is-demo="isDemoLineage"
+        />
       </div>
     </main>
 
