@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-from app.api import portfolio, market, cycle, risk, education, trace, admin
+from app.api import portfolio, market, cycle, risk, education, trace, admin, rule, diagnose_chat
 from app.models.database import engine, Base
 
 
@@ -35,6 +35,8 @@ app.include_router(cycle.router, prefix="/api/cycle", tags=["周期分析"])
 app.include_router(risk.router, prefix="/api/risk", tags=["风险评估"])
 app.include_router(education.router, prefix="/api/education", tags=["投教内容"])
 app.include_router(trace.router, prefix="/api/trace", tags=["溯源查询"])
+app.include_router(rule.router, prefix="/api/rule", tags=["合规规则"])
+app.include_router(diagnose_chat.router, prefix="/api/diagnose", tags=["诊断追问"])
 app.include_router(admin.router, prefix="/api/admin", tags=["管理后台"])
 
 

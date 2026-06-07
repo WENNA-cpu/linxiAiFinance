@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 
 from app.models.database import get_db
-from app.models.portfolio import AIOutputLog, UserFeedback, AuditLog
+from app.models.portfolio import AIOutputLog, UserFeedback, AuditLog, ComplianceLog
 
 router = APIRouter()
 
@@ -31,9 +31,13 @@ async def get_compliance_stats(db: Session = Depends(get_db)):
                 "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
 
-        blocked_count = db.query(AuditLog).filter(
+        compliance_blocked = db.query(ComplianceLog).filter(
+            ComplianceLog.action == "blocked"
+        ).count()
+        audit_blocked = db.query(AuditLog).filter(
             AuditLog.step_status.in_(["失败", "警告"])
         ).count()
+        blocked_count = compliance_blocked + audit_blocked
         rule_logs = db.query(AuditLog).filter(AuditLog.step_name.contains("规则")).all()
         rule_pass_count = sum(1 for log in rule_logs if log.step_status == "成功")
         rule_total = len(rule_logs) or 1

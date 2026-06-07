@@ -93,3 +93,62 @@ async def answer_education_question(question: str, history: Optional[List[Dict[s
     if not content:
         raise RuntimeError("DeepSeek 返回内容为空")
     return content
+
+
+DIAGNOSE_FOLLOWUP_SYSTEM_PROMPT = """你是「灵析 AI 智能投顾助手」的持仓诊断解读助手。
+
+回答要求：
+1. 仅基于提供的诊断结果进行客观解读，帮助用户理解风险与估值状态
+2. 严禁给出具体买卖建议、推荐具体标的、承诺收益或预测涨跌
+3. 若用户询问「能买吗/能卖吗/何时卖」等，礼貌说明合规限制并引导其关注风险与长期规划
+4. 回答简洁清晰，200-400字为宜，必要时使用条目列表"""
+
+
+def _format_diagnosis_context(context: Dict[str, Any]) -> str:
+    asset_name = context.get("asset_name") or "综合持仓"
+    interval = context.get("interval") or "参见诊断结论"
+    risk_level = context.get("risk_level") or "中"
+    change_pct = context.get("change_pct")
+    change_text = f"{change_pct:.2f}%" if change_pct is not None else "暂无"
+    market_trend = context.get("market_trend") or ""
+    sector_rotation = context.get("sector_rotation") or ""
+
+    lines = [
+        f"资产名称：{asset_name}",
+        f"当前估值区间：{interval}",
+        f"风险评级：{risk_level}",
+        f"涨跌幅：{change_text}",
+    ]
+    if market_trend:
+        lines.append(f"市场趋势：{market_trend}")
+    if sector_rotation:
+        lines.append(f"板块轮动：{sector_rotation}")
+    return "\n".join(lines)
+
+
+async def answer_diagnose_followup(question: str, diagnosis_context: Dict[str, Any]) -> str:
+    """基于诊断上下文的合规追问回答"""
+    context_block = _format_diagnosis_context(diagnosis_context)
+    user_content = (
+        f"用户持仓诊断结果：\n{context_block}\n\n"
+        f"用户问题：{question.strip()}\n\n"
+        "请基于以上诊断结果回答，不要给出具体的买卖建议。"
+    )
+
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": DIAGNOSE_FOLLOWUP_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+
+    response = await chat_completion(messages)
+    if "error" in response:
+        raise RuntimeError(response["error"])
+
+    choices = response.get("choices", [])
+    if not choices:
+        raise RuntimeError("DeepSeek 未返回有效回答")
+
+    content = choices[0].get("message", {}).get("content", "").strip()
+    if not content:
+        raise RuntimeError("DeepSeek 返回内容为空")
+    return content

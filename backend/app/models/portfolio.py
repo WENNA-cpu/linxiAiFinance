@@ -75,3 +75,16 @@ class AuditLog(Base):
     started_at = Column(DateTime, default=datetime.utcnow)  # 开始时间
     completed_at = Column(DateTime, nullable=True)  # 结束时间
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ComplianceLog(Base):
+    __tablename__ = "compliance_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    request_id = Column(String, index=True, nullable=True)
+    question = Column(Text)
+    action = Column(String, index=True)  # blocked / passed
+    blocked_reason = Column(Text, nullable=True)
+    matched_word = Column(String, nullable=True)
+    source = Column(String, default="diagnose_followup")
+    created_at = Column(DateTime, default=datetime.utcnow)

@@ -83,8 +83,8 @@ const aiCapabilities = {
 };
 
 const forbiddenWords = [
-  '荐股', '保证收益', '稳赚', '翻倍', '内幕消息',
-  '涨停', '抄底', '买入信号', '必涨', '包赚',
+  '荐股', '推荐股票', '涨停', '抄底', '内幕消息', '保证收益', '稳赚',
+  '能买吗', '能卖吗', '什么时候卖',
 ];
 
 const complianceStats = computed(() => [
