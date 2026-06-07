@@ -1,64 +1,24 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { usePortfolioStore } from '@/stores/portfolio';
-import { supabase } from '@/supabase/client';
 import RiskBanner from '@/components/RiskBanner.vue';
 import UploadIcon from '@/components/icons/UploadIcon.vue';
 import LockIcon from '@/components/icons/LockIcon.vue';
-import CheckCircleIcon from '@/components/icons/CheckCircleIcon.vue';
 import ArrowRightIcon from '@/components/icons/ArrowRightIcon.vue';
 import HomeIcon from '@/components/icons/HomeIcon.vue';
+import CloseIcon from '@/components/icons/CloseIcon.vue';
 
 const router = useRouter();
 const portfolioStore = usePortfolioStore();
 
-// 获取或创建会话ID
-const getSessionId = () => {
-  let sessionId = localStorage.getItem('user_session_id');
-  if (!sessionId) {
-    sessionId = 'sess_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-    localStorage.setItem('user_session_id', sessionId);
-  }
-  return sessionId;
-};
+const showClearConfirm = ref(false);
 
-// 保存持仓到数据库
-const savePortfolioToDatabase = async (assets: any[]) => {
-  try {
-    const sessionId = getSessionId();
-    const validAssets = assets.filter(a => a.code && a.name && a.quantity > 0);
+const hasStoredPortfolio = computed(() => portfolioStore.hasPortfolio);
 
-    if (validAssets.length === 0) return;
-
-    // 先删除该会话的旧持仓
-    await supabase
-      .from('user_portfolios')
-      .delete()
-      .eq('session_id', sessionId);
-
-    // 插入新持仓
-    const records = validAssets.map(asset => ({
-      session_id: sessionId,
-      ts_code: asset.code,
-      name: asset.name,
-      qty: asset.quantity,
-      cost: asset.costPrice,
-    }));
-
-    const { error } = await supabase
-      .from('user_portfolios')
-      .insert(records);
-
-    if (error) {
-      console.error('保存持仓失败:', error);
-    } else {
-      console.log('持仓已保存到数据库:', records.length, '条记录');
-    }
-  } catch (err) {
-    console.error('保存持仓异常:', err);
-  }
-};
+onMounted(() => {
+  portfolioStore.loadPortfolio();
+});
 
 const showSecurityModal = ref(false);
 const agreedToSecurity = ref(false);
@@ -84,7 +44,7 @@ const handleImport = () => {
   submitPortfolio();
 };
 
-const submitPortfolio = async () => {
+const submitPortfolio = () => {
     const validAssets = manualAssets.value.filter(a => a.code && a.name && a.quantity > 0);
     const assets = validAssets.map(a => ({
       code: a.code,
@@ -105,11 +65,8 @@ const submitPortfolio = async () => {
       totalReturnRate: totalCost > 0 ? ((totalValue - totalCost) / totalCost) * 100 : 0,
     };
 
-    // 保存到 store
+    // 保存到本地 store（AES-256 加密写入 localStorage）
     portfolioStore.setPortfolio(portfolio);
-
-    // 保存到数据库
-    await savePortfolioToDatabase(validAssets);
 
     router.push('/portfolio/diagnosis');
 };
@@ -151,7 +108,78 @@ const downloadTemplate = () => {
 const fileInput = ref<HTMLInputElement | null>(null);
 const selectedFile = ref<File | null>(null);
 const parsedAssets = ref<any[]>([]);
-const parseError = ref('');
+
+type ToastType = 'success' | 'error';
+
+const toast = ref({
+  visible: false,
+  fading: false,
+  message: '',
+  type: 'success' as ToastType,
+});
+
+let toastTimer: ReturnType<typeof setTimeout> | null = null;
+let toastFadeTimer: ReturnType<typeof setTimeout> | null = null;
+
+const hideToast = () => {
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+    toastTimer = null;
+  }
+  if (!toast.value.visible) return;
+
+  toast.value.fading = true;
+  if (toastFadeTimer) clearTimeout(toastFadeTimer);
+  toastFadeTimer = setTimeout(() => {
+    toast.value.visible = false;
+    toast.value.fading = false;
+  }, 300);
+};
+
+const showToast = (message: string, type: ToastType) => {
+  if (toastTimer) clearTimeout(toastTimer);
+  if (toastFadeTimer) clearTimeout(toastFadeTimer);
+
+  toast.value = {
+    visible: true,
+    fading: false,
+    message,
+    type,
+  };
+
+  toastTimer = setTimeout(() => hideToast(), 2000);
+};
+
+const showParseSuccess = (count: number) => {
+  showToast(`成功解析 ${count} 条资产数据`, 'success');
+};
+
+const showParseFailure = (message: string) => {
+  showToast(message, 'error');
+};
+
+onUnmounted(() => {
+  if (toastTimer) clearTimeout(toastTimer);
+  if (toastFadeTimer) clearTimeout(toastFadeTimer);
+});
+
+const clearSelectedFile = () => {
+  selectedFile.value = null;
+  parsedAssets.value = [];
+  if (fileInput.value) {
+    fileInput.value.value = '';
+  }
+  manualAssets.value = [{ code: '', name: '', type: 'stock', quantity: 0, costPrice: 0 }];
+};
+
+const handleClearData = () => {
+  portfolioStore.clearPortfolio();
+  agreedToSecurity.value = false;
+  manualAssets.value = [{ code: '', name: '', type: 'stock', quantity: 0, costPrice: 0 }];
+  clearSelectedFile();
+  showClearConfirm.value = false;
+  showToast('本地持仓数据已清空', 'success');
+};
 
 const triggerFileSelect = () => {
   fileInput.value?.click();
@@ -160,55 +188,59 @@ const triggerFileSelect = () => {
 const handleFileChange = (event: Event) => {
   const target = event.target as HTMLInputElement;
   const file = target.files?.[0];
-  if (file) {
-    selectedFile.value = file;
-    parseError.value = '';
-    console.log('选择的文件:', file.name);
-    parseFile(file);
-  }
+  if (!file) return;
+
+  // 直接选择新文件时自动替换当前文件
+  selectedFile.value = file;
+  parsedAssets.value = [];
+  parseFile(file);
 };
 
-// 解析CSV/Excel文件
+// 解析 CSV/Excel 文件
 const parseFile = (file: File) => {
   const reader = new FileReader();
 
   reader.onload = (e) => {
     try {
       const content = e.target?.result as string;
-      console.log('文件内容:', content.substring(0, 500));
 
-      // 解析CSV
       const lines = content.split('\n').filter(line => line.trim());
-      console.log('解析行数:', lines.length);
 
       if (lines.length < 2) {
-        parseError.value = '文件格式错误，至少需要包含表头和一行数据';
+        showParseFailure('文件格式错误，至少需要包含表头和一行数据');
         return;
       }
 
-      // 解析表头
       const headers = lines[0].split(',').map(h => h.trim().replace(/^\uFEFF/, ''));
-      console.log('表头:', headers);
 
-      // 查找列索引
       const codeIndex = headers.findIndex(h => h.includes('代码') || h.toLowerCase() === 'code');
       const nameIndex = headers.findIndex(h => h.includes('名称') || h.toLowerCase() === 'name');
       const typeIndex = headers.findIndex(h => h.includes('类型') || h.toLowerCase() === 'type');
       const quantityIndex = headers.findIndex(h => h.includes('数量') || h.toLowerCase() === 'quantity');
       const costPriceIndex = headers.findIndex(h => h.includes('成本价') || h.includes('成本') || h.toLowerCase() === 'cost');
 
-      console.log('列索引:', { codeIndex, nameIndex, typeIndex, quantityIndex, costPriceIndex });
-
       if (codeIndex === -1 || nameIndex === -1) {
-        parseError.value = '文件格式错误，缺少必要的列（代码、名称）';
+        showParseFailure('文件格式错误，缺少必要的列（代码、名称）');
         return;
       }
 
-      // 解析数据行
       const assets: any[] = [];
       for (let i = 1; i < lines.length; i++) {
+        const rowNum = i + 1;
         const cells = lines[i].split(',').map(c => c.trim());
         if (cells.length < 2 || !cells[codeIndex]) continue;
+
+        const quantityStr = quantityIndex >= 0 ? cells[quantityIndex] : '';
+        const costStr = costPriceIndex >= 0 ? cells[costPriceIndex] : '';
+
+        if (quantityStr && Number.isNaN(Number(quantityStr))) {
+          showParseFailure(`第 ${rowNum} 行数据格式错误`);
+          return;
+        }
+        if (costStr && Number.isNaN(Number(costStr))) {
+          showParseFailure(`第 ${rowNum} 行数据格式错误`);
+          return;
+        }
 
         const typeMap: Record<string, string> = {
           '股票': 'stock',
@@ -218,24 +250,20 @@ const parseFile = (file: File) => {
           '其他': 'other',
         };
 
-        const asset = {
+        assets.push({
           code: cells[codeIndex],
           name: cells[nameIndex] || '',
           type: typeMap[cells[typeIndex]] || 'stock',
-          quantity: parseFloat(cells[quantityIndex]) || 0,
-          costPrice: parseFloat(cells[costPriceIndex]) || 0,
-        };
-
-        assets.push(asset);
+          quantity: quantityStr ? parseFloat(quantityStr) : 0,
+          costPrice: costStr ? parseFloat(costStr) : 0,
+        });
       }
 
-      console.log('解析的资产:', assets);
       parsedAssets.value = assets;
 
       if (assets.length === 0) {
-        parseError.value = '未能解析出有效数据';
+        showParseFailure('未能解析出有效数据');
       } else {
-        // 自动填充到manualAssets
         manualAssets.value = assets.map(a => ({
           code: a.code,
           name: a.name,
@@ -243,17 +271,15 @@ const parseFile = (file: File) => {
           quantity: a.quantity,
           costPrice: a.costPrice,
         }));
-        console.log('已填充到manualAssets:', manualAssets.value);
-        alert(`成功解析 ${assets.length} 条资产数据`);
+        showParseSuccess(assets.length);
       }
     } catch (error) {
-      console.error('解析文件失败:', error);
-      parseError.value = '解析文件失败: ' + (error as Error).message;
+      showParseFailure('解析文件失败: ' + (error as Error).message);
     }
   };
 
   reader.onerror = () => {
-    parseError.value = '读取文件失败';
+    showParseFailure('读取文件失败');
   };
 
   reader.readAsText(file);
@@ -270,6 +296,18 @@ const parseFile = (file: File) => {
           <HomeIcon class="w-5 h-5 text-slate-600" />
         </button>
         <h1 class="text-xl font-bold text-slate-900">导入持仓</h1>
+        <div v-if="hasStoredPortfolio" class="ml-auto flex items-center gap-3">
+          <span class="text-sm text-emerald-600 bg-emerald-50 px-3 py-1 rounded-full">
+            已保存 {{ portfolioStore.portfolio.assets.length }} 只资产（本地加密）
+          </span>
+          <button
+            type="button"
+            class="text-sm text-red-600 hover:text-red-700 hover:bg-red-50 px-3 py-1.5 rounded-lg transition-colors"
+            @click="showClearConfirm = true"
+          >
+            清空数据
+          </button>
+        </div>
       </div>
     </header>
 
@@ -379,18 +417,28 @@ const parseFile = (file: File) => {
 
           <!-- 已选择文件显示 -->
           <div v-if="selectedFile" class="mb-4 p-3 bg-slate-100 rounded-lg">
-            <p class="text-sm text-slate-600">已选择: <span class="font-medium text-slate-900">{{ selectedFile.name }}</span></p>
-            <p class="text-xs text-slate-500">{{ (selectedFile.size / 1024).toFixed(2) }} KB</p>
-          </div>
-
-          <!-- 解析错误提示 -->
-          <div v-if="parseError" class="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg">
-            <p class="text-sm text-red-600">{{ parseError }}</p>
-          </div>
-
-          <!-- 解析成功提示 -->
-          <div v-if="parsedAssets.length > 0 && !parseError" class="mb-4 p-3 bg-emerald-50 border border-emerald-200 rounded-lg">
-            <p class="text-sm text-emerald-600">成功解析 {{ parsedAssets.length }} 条资产数据，点击「开始诊断」进行AI分析</p>
+            <div class="flex items-center justify-center gap-2 flex-wrap">
+              <p class="text-sm text-slate-600">
+                已选择: <span class="font-medium text-slate-900">{{ selectedFile.name }}</span>
+              </p>
+              <button
+                type="button"
+                class="inline-flex items-center justify-center p-1 rounded-md text-slate-500 hover:text-red-600 hover:bg-red-50 transition-colors"
+                title="清除已选文件"
+                aria-label="清除已选文件"
+                @click="clearSelectedFile"
+              >
+                <CloseIcon class="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                class="text-sm text-indigo-600 hover:text-indigo-800 hover:underline"
+                @click="clearSelectedFile"
+              >
+                重新选择
+              </button>
+            </div>
+            <p class="text-xs text-slate-500 mt-1">{{ (selectedFile.size / 1024).toFixed(2) }} KB</p>
           </div>
 
           <div class="flex flex-col sm:flex-row gap-3 justify-center items-center">
@@ -398,7 +446,7 @@ const parseFile = (file: File) => {
               @click="triggerFileSelect"
               class="px-6 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
             >
-              {{ selectedFile ? '重新选择' : '选择文件' }}
+              选择文件
             </button>
             <button
               @click="downloadTemplate"
@@ -470,5 +518,61 @@ const parseFile = (file: File) => {
         </div>
       </div>
     </div>
+
+    <div
+      v-if="showClearConfirm"
+      class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+      @click.self="showClearConfirm = false"
+    >
+      <div class="bg-white rounded-xl p-6 w-full max-w-md mx-4">
+        <h3 class="text-lg font-semibold text-slate-900 mb-2">确认清空本地数据？</h3>
+        <p class="text-sm text-slate-600 mb-6">
+          将删除本设备上 AES-256 加密存储的全部持仓与诊断缓存，此操作不可恢复。
+        </p>
+        <div class="flex gap-3">
+          <button
+            type="button"
+            class="flex-1 py-2 border border-slate-300 rounded-lg text-slate-700 hover:bg-slate-50 transition-colors"
+            @click="showClearConfirm = false"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            class="flex-1 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
+            @click="handleClearData"
+          >
+            确认清空
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 浮动消息提示（Teleport 至 body，不影响页面布局） -->
+    <Teleport to="body">
+      <div
+        v-show="toast.visible"
+        class="fixed top-4 right-4 z-[9999] max-w-sm pointer-events-none"
+      >
+        <div
+          class="flex items-start gap-3 px-4 py-3 rounded-lg shadow-lg text-white pointer-events-auto transition-opacity duration-300 ease-in-out"
+          :class="[
+            toast.type === 'success' ? 'bg-emerald-600' : 'bg-red-600',
+            toast.fading ? 'opacity-0' : 'opacity-100',
+          ]"
+          role="alert"
+        >
+          <p class="text-sm flex-1 leading-relaxed">{{ toast.message }}</p>
+          <button
+            type="button"
+            class="flex-shrink-0 p-0.5 rounded hover:bg-white/20 transition-colors"
+            aria-label="关闭提示"
+            @click="hideToast"
+          >
+            <CloseIcon class="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
