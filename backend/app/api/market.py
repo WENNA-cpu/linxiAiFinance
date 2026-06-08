@@ -3,11 +3,21 @@ from sqlalchemy.orm import Session
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import random
+import time
 
 from app.models.database import get_db
 from app.services.data_service import DataService
 
 router = APIRouter()
+
+# 情绪指标短时间内变化小，缓存 8 分钟以减少 Tushare 调用
+SENTIMENT_CACHE_TTL = 480
+_sentiment_metrics_cache: Optional[Dict[str, Any]] = None
+_sentiment_metrics_cached_at: float = 0.0
+
+DATA_SOURCE_LABEL = (
+    "数据基于Tushare全市场换手率、涨跌比等公开数据加权计算，仅作参考。"
+)
 
 
 def get_sentiment_status(index: int) -> str:
@@ -104,7 +114,27 @@ async def fetch_stk_shock(data_service: DataService, trade_date: str) -> List[Di
     return []
 
 
-async def _fetch_sentiment_metrics() -> Dict[str, Any]:
+def _get_cached_sentiment_metrics() -> Optional[Dict[str, Any]]:
+    global _sentiment_metrics_cache, _sentiment_metrics_cached_at
+    if _sentiment_metrics_cache is None:
+        return None
+    if time.time() - _sentiment_metrics_cached_at >= SENTIMENT_CACHE_TTL:
+        return None
+    return _sentiment_metrics_cache
+
+
+def _set_cached_sentiment_metrics(metrics: Dict[str, Any]) -> None:
+    global _sentiment_metrics_cache, _sentiment_metrics_cached_at
+    _sentiment_metrics_cache = metrics
+    _sentiment_metrics_cached_at = time.time()
+
+
+async def _fetch_sentiment_metrics(*, use_cache: bool = True) -> Dict[str, Any]:
+    if use_cache:
+        cached = _get_cached_sentiment_metrics()
+        if cached is not None:
+            return cached
+
     data_service = DataService()
     trade_date = datetime.now().strftime("%Y%m%d")
     limit_data = await fetch_limit_list(data_service, trade_date)
@@ -114,7 +144,7 @@ async def _fetch_sentiment_metrics() -> Dict[str, Any]:
     warning_signals = len(shock_records)
     sentiment_index = calculate_sentiment_index(limit_up, limit_down, warning_signals)
 
-    return {
+    metrics = {
         "sentiment_index": sentiment_index,
         "status": get_sentiment_status(sentiment_index),
         "market_state": get_market_state(sentiment_index),
@@ -125,12 +155,15 @@ async def _fetch_sentiment_metrics() -> Dict[str, Any]:
         "shock_records": shock_records,
         "shock_count": warning_signals,
     }
+    _set_cached_sentiment_metrics(metrics)
+    return metrics
 
 
 @router.get("/sentiment")
 async def get_market_sentiment(db: Session = Depends(get_db)):
     """获取市场情绪指数 - 基于 Tushare 真实数据"""
     try:
+        was_cached = _get_cached_sentiment_metrics() is not None
         metrics = await _fetch_sentiment_metrics()
         return {
             "sentiment_index": metrics["sentiment_index"],
@@ -143,8 +176,9 @@ async def get_market_sentiment(db: Session = Depends(get_db)):
                 "limit_down": metrics["limit_down"],
                 "shock_records": metrics["shock_records"][:10],
             },
-            "data_source": "Tushare实时数据",
+            "data_source": DATA_SOURCE_LABEL,
             "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "cached": was_cached,
             "components": {
                 "limit_up": metrics["limit_up"],
                 "limit_down": metrics["limit_down"],
@@ -160,6 +194,7 @@ async def get_market_sentiment(db: Session = Depends(get_db)):
 async def get_behavior_bias(db: Session = Depends(get_db)):
     """获取行为偏差检测数据 - 基于市场情绪计算"""
     try:
+        was_cached = _get_cached_sentiment_metrics() is not None
         metrics = await _fetch_sentiment_metrics()
         bias = calculate_behavior_bias(
             metrics["sentiment_index"],
@@ -170,8 +205,9 @@ async def get_behavior_bias(db: Session = Depends(get_db)):
         return {
             **bias,
             "sentiment_index": metrics["sentiment_index"],
-            "data_source": "基于Tushare市场情绪数据计算",
+            "data_source": DATA_SOURCE_LABEL,
             "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "cached": was_cached,
             "methodology": {
                 "confirmation_bias": "情绪越高，确认偏误越强",
                 "loss_aversion": "情绪越低，损失厌恶越强",
