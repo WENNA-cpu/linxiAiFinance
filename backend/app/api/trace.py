@@ -10,8 +10,26 @@ from app.services.trace_service import build_lineage_from_logs
 router = APIRouter()
 
 
+def _duration_ms(log) -> int | None:
+    if log.started_at and log.completed_at:
+        delta = log.completed_at - log.started_at
+        return max(0, int(delta.total_seconds() * 1000))
+    return None
+
+
+def _normalize_step_status(status: str, completed_at) -> str:
+    if status == "失败":
+        return "failed"
+    if status in ("成功", "警告"):
+        return "success"
+    if completed_at is None:
+        return "running"
+    return "success"
+
+
 def _build_trace_response(request_id: str, logs: list) -> dict:
     log_list = []
+    steps = []
     for index, log in enumerate(logs, start=1):
         log_list.append({
             "step_order": index,
@@ -20,6 +38,12 @@ def _build_trace_response(request_id: str, logs: list) -> dict:
             "step_detail": log.step_detail,
             "started_at": log.started_at.isoformat() if log.started_at else None,
             "completed_at": log.completed_at.isoformat() if log.completed_at else None,
+        })
+        steps.append({
+            "step_name": log.step_name,
+            "step_status": _normalize_step_status(log.step_status, log.completed_at),
+            "step_detail": log.step_detail or "",
+            "duration_ms": _duration_ms(log),
         })
 
     success_count = sum(1 for log in logs if log.step_status == "成功")
@@ -35,6 +59,7 @@ def _build_trace_response(request_id: str, logs: list) -> dict:
         "found": True,
         "generated_at": logs[0].created_at.isoformat() if logs else datetime.utcnow().isoformat(),
         "logs": log_list,
+        "steps": steps,
         "summary": {
             "total_steps": len(logs),
             "success_steps": success_count,

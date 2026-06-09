@@ -1,21 +1,45 @@
 import aiohttp
+import asyncio
+import json
 import os
+import time
 import pandas as pd
-from typing import Dict, Any, Optional, List
+from pathlib import Path
+from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, timedelta
+
+_CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "cache" / "tushare"
 
 
 class DataService:
     """数据服务 - Tushare API集成"""
 
+    _daily_basic_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+    _last_daily_basic_at: float = 0.0
+    DAILY_BASIC_CACHE_TTL = 3600
+    DAILY_BASIC_MIN_INTERVAL = 65
+
+    @staticmethod
+    def _normalize_ts_code(code: str) -> str:
+        if "." in code:
+            return code
+        if code.startswith("6"):
+            return f"{code}.SH"
+        return f"{code}.SZ"
+
     def __init__(self):
-        # 使用提供的MCP Server Token
-        self.tushare_token = os.getenv("TUSHARE_TOKEN", "323c3aa4a72205441336067dca690bc3918112710e224e1818456d29")
+        self.tushare_token = os.getenv("TUSHARE_TOKEN", "").strip()
         self.base_url = "https://api.tushare.pro"
+
+    async def _wait_daily_basic_slot(self) -> None:
+        elapsed = time.time() - DataService._last_daily_basic_at
+        if elapsed < self.DAILY_BASIC_MIN_INTERVAL:
+            await asyncio.sleep(self.DAILY_BASIC_MIN_INTERVAL - elapsed)
 
     async def _request(self, api_name: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """发送Tushare API请求"""
         if not self.tushare_token:
+            print(f"Tushare {api_name}: TUSHARE_TOKEN 未配置")
             return None
 
         async with aiohttp.ClientSession() as session:
@@ -25,11 +49,14 @@ class DataService:
                 "params": params,
             }
             try:
-                async with session.post(self.base_url, json=payload) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        if result.get("code") == 0:
-                            return result.get("data", {})
+                async with session.post(self.base_url, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                    if response.status != 200:
+                        print(f"Tushare {api_name}: HTTP {response.status}")
+                        return None
+                    result = await response.json()
+                    if result.get("code") == 0:
+                        return result.get("data", {})
+                    print(f"Tushare {api_name} error {result.get('code')}: {result.get('msg')}")
             except Exception as e:
                 print(f"Error calling {api_name}: {e}")
         return None
@@ -80,18 +107,94 @@ class DataService:
             return [dict(zip(fields, item)) for item in items]
         return None
 
-    async def fetch_daily_basic_historical(self, ts_code: str, start_date: str, end_date: str) -> Optional[List[Dict]]:
-        """获取历史每日指标（估值数据）"""
+    def _disk_cache_path(self, ts_code: str) -> Path:
+        safe = ts_code.replace(".", "_")
+        return _CACHE_DIR / f"daily_basic_{safe}.json"
+
+    def _load_disk_cache(self, ts_code: str) -> Optional[List[Dict[str, Any]]]:
+        path = self._disk_cache_path(ts_code)
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if time.time() - payload.get("ts", 0) > self.DAILY_BASIC_CACHE_TTL:
+                return None
+            return payload.get("rows") or None
+        except Exception:
+            return None
+
+    def _save_disk_cache(self, ts_code: str, rows: List[Dict[str, Any]]) -> None:
+        try:
+            _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            path = self._disk_cache_path(ts_code)
+            path.write_text(
+                json.dumps({"ts": time.time(), "rows": rows}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            print(f"Failed to save tushare cache: {e}")
+
+    def _get_cached_rows(self, ts_code: str) -> Optional[List[Dict[str, Any]]]:
+        mem = self._daily_basic_cache.get(ts_code)
+        if mem and time.time() - mem[0] < self.DAILY_BASIC_CACHE_TTL:
+            return mem[1]
+        disk = self._load_disk_cache(ts_code)
+        if disk:
+            self._daily_basic_cache[ts_code] = (time.time(), disk)
+            return disk
+        return None
+
+    def _filter_by_date_range(
+        self,
+        rows: List[Dict[str, Any]],
+        start_date: str,
+        end_date: str,
+    ) -> List[Dict[str, Any]]:
+        return [
+            row for row in rows
+            if start_date <= str(row.get("trade_date", "")) <= end_date
+        ]
+
+    async def fetch_daily_basic_historical(
+        self,
+        ts_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> Optional[List[Dict]]:
+        """获取历史每日指标（估值数据），带缓存与频率控制"""
+        ts_code = self._normalize_ts_code(ts_code)
+
+        cached_rows = self._get_cached_rows(ts_code)
+        if cached_rows:
+            filtered = self._filter_by_date_range(cached_rows, start_date, end_date)
+            if filtered:
+                return filtered
+
+        fetch_end = end_date or datetime.now().strftime("%Y%m%d")
+        fetch_start = (datetime.now() - timedelta(days=1095 + 45)).strftime("%Y%m%d")
+
+        await self._wait_daily_basic_slot()
         data = await self._request("daily_basic", {
             "ts_code": ts_code,
-            "start_date": start_date,
-            "end_date": end_date,
+            "start_date": fetch_start,
+            "end_date": fetch_end,
         })
+        DataService._last_daily_basic_at = time.time()
 
         if data and "items" in data:
             fields = data.get("fields", [])
             items = data.get("items", [])
-            return [dict(zip(fields, item)) for item in items]
+            rows = [dict(zip(fields, item)) for item in items]
+            if rows:
+                self._daily_basic_cache[ts_code] = (time.time(), rows)
+                self._save_disk_cache(ts_code, rows)
+            filtered = self._filter_by_date_range(rows, start_date, end_date)
+            if filtered:
+                return filtered
+
+        if cached_rows:
+            return self._filter_by_date_range(cached_rows, start_date, end_date)
+
         return None
 
     async def fetch_index_daily(self, ts_code: str = "000001.SH") -> Optional[List[Dict]]:

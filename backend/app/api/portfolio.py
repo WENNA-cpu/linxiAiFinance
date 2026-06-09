@@ -5,6 +5,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 import random
 import os
+import asyncio
 import aiohttp
 
 from app.models.database import get_db
@@ -18,7 +19,7 @@ from app.config import NEW_MODEL_RATIO
 router = APIRouter()
 
 # Tushare配置
-TUSHARE_TOKEN = os.getenv("TUSHARE_TOKEN", "323c3aa4a72205441336067dca690bc3918112710e224e1818456d29")
+TUSHARE_TOKEN = os.getenv("TUSHARE_TOKEN", "").strip()
 
 
 async def fetch_tushare_daily(ts_code: str) -> Optional[Dict[str, Any]]:
@@ -110,6 +111,72 @@ async def fetch_asset_history(ts_code: str, days: int = 365) -> List[Dict[str, A
             merged.update({k: basic_map[td].get(k) for k in ("pe", "pb", "ps", "turnover_rate")})
         rows.append(merged)
     return rows
+
+
+async def _fetch_quotes_parallel(assets: List, timeout: float = 12.0) -> Dict[str, Any]:
+    """并行拉取行情，超时后回退到用户导入价格"""
+
+    async def _one(asset) -> tuple:
+        ts_code = _normalize_ts_code(asset.code)
+        try:
+            quote = await asyncio.wait_for(fetch_stock_quote(ts_code), timeout=4.0)
+            return asset.code, quote
+        except Exception:
+            return asset.code, None
+
+    pairs: List[tuple] = []
+    try:
+        pairs = await asyncio.wait_for(
+            asyncio.gather(*[_one(a) for a in assets]),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        print("[诊断] 行情拉取超时，使用用户导入价格")
+
+    return {code: quote for code, quote in pairs if quote}
+
+
+async def _run_lstm_trend_light(assets: List, asset_quotes: dict, request_id: str) -> Dict[str, Any]:
+    """快速诊断：不拉取长历史，避免 Tushare daily_basic 限流导致超时"""
+    try:
+        return await asyncio.wait_for(
+            _run_lstm_trend(assets, asset_quotes, request_id),
+            timeout=6.0,
+        )
+    except (asyncio.TimeoutError, Exception) as e:
+        print(f"[诊断] LSTM 快速模式跳过: {e}")
+        return {
+            "available": False,
+            "forecasts": [],
+            "bullish_ratio": 0.0,
+            "model_variant": "skipped",
+            "reason": "快速诊断模式",
+        }
+
+
+async def _run_rf_risk_light(assets: List) -> Dict[str, Any]:
+    """快速诊断：RF 超时则回退规则引擎"""
+    try:
+        return await asyncio.wait_for(_run_rf_risk(assets), timeout=6.0)
+    except (asyncio.TimeoutError, Exception) as e:
+        print(f"[诊断] RF 快速模式跳过: {e}")
+        rule_high = 0
+        predictions = []
+        for asset in assets:
+            if asset.cost_price and asset.current_price:
+                pct = (asset.current_price - asset.cost_price) / asset.cost_price * 100
+                if pct < -5:
+                    rule_high += 1
+                    predictions.append({
+                        "code": asset.code,
+                        "name": asset.name,
+                        "risk_level": "高风险",
+                    })
+        return {
+            "model_available": False,
+            "high_risk_count": rule_high,
+            "asset_predictions": predictions,
+        }
 
 
 async def _run_lstm_trend(assets: List, asset_quotes: dict, request_id: str) -> Dict[str, Any]:
@@ -302,22 +369,24 @@ async def diagnose_portfolio(data: PortfolioInput, db: Session = Depends(get_db)
         }
 
     step_start = datetime.utcnow()
-    asset_quotes = {}
-    success_count = 0
-    for asset in assets:
-        ts_code = asset.code
-        if '.' not in ts_code:
-            ts_code = f"{ts_code}.SH" if ts_code.startswith('6') else f"{ts_code}.SZ"
-        quote = await fetch_stock_quote(ts_code)
-        if quote:
-            asset_quotes[asset.code] = quote
-            success_count += 1
-
-    record_audit_step(
-        db, request_id, "数据获取",
-        f"共{total_assets}只资产",
-        audit_logs, started_at=step_start,
+    # 若用户已提供成本价/现价，优先使用本地数据，避免阻塞
+    has_local_prices = all(
+        a.cost_price and a.current_price for a in assets
     )
+    if has_local_prices:
+        asset_quotes = {}
+        record_audit_step(
+            db, request_id, "数据获取",
+            f"共{total_assets}只资产（使用用户导入价格，跳过行情拉取）",
+            audit_logs, started_at=step_start,
+        )
+    else:
+        asset_quotes = await _fetch_quotes_parallel(assets)
+        record_audit_step(
+            db, request_id, "数据获取",
+            f"共{total_assets}只资产，行情命中 {len(asset_quotes)} 只",
+            audit_logs, started_at=step_start,
+        )
 
     step_start = datetime.utcnow()
     total_cost = sum(a.cost_price * 100 for a in assets if a.cost_price)
@@ -371,22 +440,56 @@ async def diagnose_portfolio(data: PortfolioInput, db: Session = Depends(get_db)
     worst_sector = min(sector_avg.items(), key=lambda x: x[1]) if sector_avg else ("未知", 0)
 
     lstm_start = datetime.utcnow()
-    lstm_result = await _run_lstm_trend(assets, asset_quotes, request_id)
-    if lstm_result.get("available"):
-        lstm_detail = (
-            f"完成趋势分析，{len(lstm_result['forecasts'])}只资产预测，"
-            f"看涨比例{lstm_result['bullish_ratio']:.0%}，模型={lstm_result['model_variant']}"
-        )
+    if has_local_prices:
+        lstm_result = {
+            "available": False,
+            "forecasts": [],
+            "bullish_ratio": 0.0,
+            "model_variant": "skipped",
+            "reason": "用户已提供价格，快速诊断模式",
+        }
+        lstm_detail = "跳过 LSTM（用户导入价格，快速诊断）"
     else:
-        lstm_detail = "完成趋势分析（模型未就绪，使用规则补充）"
+        lstm_result = await _run_lstm_trend_light(assets, asset_quotes, request_id)
+        if lstm_result.get("available"):
+            lstm_detail = (
+                f"完成趋势分析，{len(lstm_result['forecasts'])}只资产预测，"
+                f"看涨比例{lstm_result['bullish_ratio']:.0%}，模型={lstm_result['model_variant']}"
+            )
+        else:
+            lstm_detail = "完成趋势分析（模型未就绪，使用规则补充）"
     record_audit_step(
         db, request_id, "LSTM模型预测", lstm_detail, audit_logs,
         started_at=lstm_start,
     )
 
     rf_start = datetime.utcnow()
-    rf_result = await _run_rf_risk(assets)
-    rf_high_risk = rf_result.get("high_risk_count", 0)
+    if has_local_prices:
+        rule_high = 0
+        predictions = []
+        for asset in assets:
+            if asset.cost_price and asset.current_price:
+                pct = (asset.current_price - asset.cost_price) / asset.cost_price * 100
+                if pct < -5:
+                    rule_high += 1
+                    predictions.append({
+                        "code": asset.code,
+                        "name": asset.name,
+                        "risk_level": "高风险",
+                    })
+        rf_result = {
+            "model_available": False,
+            "high_risk_count": rule_high,
+            "asset_predictions": predictions,
+        }
+        rf_detail = f"识别出{rule_high}个风险资产（规则引擎，快速诊断）"
+    else:
+        rf_result = await _run_rf_risk_light(assets)
+        rf_detail = (
+            f"识别出{rf_result.get('high_risk_count', 0)}个风险资产（随机森林）"
+            if rf_result.get("model_available")
+            else f"识别出{len(risk_assets)}个风险资产（规则引擎）"
+        )
     rf_risk_assets = [
         p for p in rf_result.get("asset_predictions", [])
         if p.get("risk_level") == "高风险"
@@ -401,11 +504,6 @@ async def diagnose_portfolio(data: PortfolioInput, db: Session = Depends(get_db)
                     "today_change": 0,
                     "rf_risk_level": ra.get("risk_level"),
                 })
-    rf_detail = (
-        f"识别出{rf_high_risk}个风险资产（随机森林）"
-        if rf_result.get("model_available")
-        else f"识别出{len(risk_assets)}个风险资产（规则引擎）"
-    )
     record_audit_step(
         db, request_id, "随机森林风险评估", rf_detail, audit_logs,
         started_at=rf_start,
@@ -524,8 +622,11 @@ async def diagnose_portfolio(data: PortfolioInput, db: Session = Depends(get_db)
             "opportunities": opportunities,
         },
         "data_source": {
-            "time_range": datetime.now().strftime("%Y-%m-%d"),
-            "sources": ["用户持仓数据", "Tushare行情数据"],
+            "time_range": (
+                f"{(datetime.now() - timedelta(days=150)).strftime('%Y-%m-%d')} 至 "
+                f"{datetime.now().strftime('%Y-%m-%d')}"
+            ),
+            "sources": ["用户持仓数据", "Tushare行情数据", "行业研报摘要"],
             "update_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
         },
         "detail": {

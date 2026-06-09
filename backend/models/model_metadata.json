@@ -1,25 +1,25 @@
 {
   "active": {
     "lstm_cycle": {
-      "version": "v20260605_192814",
+      "version": "v20260608_090710",
       "model_type": "lstm_cycle",
-      "path": "models\\versions\\lstm_cycle\\v20260605_192814\\lstm_cycle.h5",
+      "path": "models\\versions\\lstm_cycle\\v20260608_090710\\lstm_cycle.h5",
       "files": [
-        "E:\\linxiAiFinance\\backend\\models\\versions\\lstm_cycle\\v20260605_192814\\lstm_cycle.h5",
-        "E:\\linxiAiFinance\\backend\\models\\versions\\lstm_cycle\\v20260605_192814\\lstm_cycle_scaler.pkl",
-        "E:\\linxiAiFinance\\backend\\models\\versions\\lstm_cycle\\v20260605_192814\\lstm_loss_curve.png"
+        "E:\\linxiAiFinance\\backend\\models\\versions\\lstm_cycle\\v20260608_090710\\lstm_cycle.h5",
+        "E:\\linxiAiFinance\\backend\\models\\versions\\lstm_cycle\\v20260608_090710\\lstm_cycle_scaler.pkl",
+        "E:\\linxiAiFinance\\backend\\models\\versions\\lstm_cycle\\v20260608_090710\\lstm_loss_curve.png"
       ],
       "metrics": {
-        "train_samples": 7216,
-        "test_samples": 1804,
-        "epochs_trained": 8,
-        "final_loss": 0.0006939712911844254,
-        "final_val_loss": 0.0002641794562805444,
+        "train_samples": 168,
+        "test_samples": 42,
+        "epochs_trained": 5,
+        "final_loss": 0.03360246866941452,
+        "final_val_loss": 0.008721645921468735,
         "model_path": "E:\\linxiAiFinance\\backend\\models\\lstm_cycle.h5",
         "scaler_path": "E:\\linxiAiFinance\\backend\\models\\lstm_cycle_scaler.pkl",
         "loss_plot": "E:\\linxiAiFinance\\backend\\models\\reports\\lstm_loss_curve.png"
       },
-      "created_at": "2026-06-05T19:28:14.638030"
+      "created_at": "2026-06-08T09:07:10.255577"
     },
     "rf_risk": {
       "version": "v20260605_192852",
@@ -47,6 +47,27 @@
     }
   },
   "history": [
+    {
+      "version": "v20260608_090710",
+      "model_type": "lstm_cycle",
+      "path": "models\\versions\\lstm_cycle\\v20260608_090710\\lstm_cycle.h5",
+      "files": [
+        "E:\\linxiAiFinance\\backend\\models\\versions\\lstm_cycle\\v20260608_090710\\lstm_cycle.h5",
+        "E:\\linxiAiFinance\\backend\\models\\versions\\lstm_cycle\\v20260608_090710\\lstm_cycle_scaler.pkl",
+        "E:\\linxiAiFinance\\backend\\models\\versions\\lstm_cycle\\v20260608_090710\\lstm_loss_curve.png"
+      ],
+      "metrics": {
+        "train_samples": 168,
+        "test_samples": 42,
+        "epochs_trained": 5,
+        "final_loss": 0.03360246866941452,
+        "final_val_loss": 0.008721645921468735,
+        "model_path": "E:\\linxiAiFinance\\backend\\models\\lstm_cycle.h5",
+        "scaler_path": "E:\\linxiAiFinance\\backend\\models\\lstm_cycle_scaler.pkl",
+        "loss_plot": "E:\\linxiAiFinance\\backend\\models\\reports\\lstm_loss_curve.png"
+      },
+      "created_at": "2026-06-08T09:07:10.255577"
+    },
     {
       "version": "v20260605_192852",
       "model_type": "rf_risk",

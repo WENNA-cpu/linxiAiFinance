@@ -18,10 +18,12 @@ router = APIRouter()
 class CycleAnalysisInput(BaseModel):
     asset_code: str
     time_range: str = "3y"
+    lookback_days: int | None = None
 
 
 class CycleAnalyzeInput(BaseModel):
     ts_code: str
+    lookback_days: int | None = None
 
 
 class ModelTrainingInput(BaseModel):
@@ -34,8 +36,16 @@ TIME_RANGE_DAYS = {
     "3m": 90,
     "6m": 180,
     "1y": 365,
-    "3y": 365 * 3,
+    "3y": 1095,
 }
+
+MIN_PE_POINTS = 5
+
+
+def resolve_lookback_days(time_range: str, lookback_days: int | None) -> int:
+    if lookback_days is not None and lookback_days > 0:
+        return lookback_days
+    return TIME_RANGE_DAYS.get(time_range, 1095)
 
 
 def normalize_ts_code(code: str) -> str:
@@ -83,57 +93,123 @@ async def run_lstm_forecast(ts_code: str, use_new: bool) -> Dict[str, Any]:
     return result
 
 
-async def analyze_pe_pb(ts_code: str, time_range: str = "3y") -> Dict[str, Any]:
+async def fetch_daily_price_window(ts_code: str, days: int) -> List[Dict[str, Any]]:
+    """daily 行情降级：在 daily_basic 限流时使用收盘价做周期分位分析"""
+    data_service = DataService()
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days + 45)
+    rows = await data_service.fetch_daily_data(
+        ts_code,
+        start_date.strftime("%Y%m%d"),
+        end_date.strftime("%Y%m%d"),
+    )
+    if not rows:
+        return []
+    window_start = (end_date - timedelta(days=days)).strftime("%Y%m%d")
+    filtered = [r for r in rows if str(r.get("trade_date", "")) >= window_start]
+    return sorted(filtered, key=lambda x: x.get("trade_date", ""))
+
+
+def format_trade_date(trade_date: str) -> str:
+    if trade_date and len(trade_date) == 8:
+        return f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
+    return trade_date
+
+
+async def analyze_pe_pb(
+    ts_code: str,
+    time_range: str = "3y",
+    lookback_days: int | None = None,
+) -> Dict[str, Any]:
     """基于 Tushare PE/PB 分位数的周期分析 + LSTM 价格预测"""
     data_service = DataService()
     ts_code = normalize_ts_code(ts_code)
-    days = TIME_RANGE_DAYS.get(time_range, 365 * 3)
+    days = resolve_lookback_days(time_range, lookback_days)
+    # 多取一些日历天数以覆盖非交易日
+    fetch_days = max(days + 45, 90)
 
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=days)
+    start_date = end_date - timedelta(days=fetch_days)
     daily_basic_list = await data_service.fetch_daily_basic_historical(
         ts_code,
         start_date.strftime("%Y%m%d"),
         end_date.strftime("%Y%m%d"),
     )
 
-    if not daily_basic_list or len(daily_basic_list) < 30:
-        raise HTTPException(
-            status_code=404,
-            detail=f"无法从 Tushare 获取 {ts_code} 的估值历史数据，请检查股票代码或 API Token",
-        )
+    if not daily_basic_list:
+        price_rows = await fetch_daily_price_window(ts_code, days)
+        if len(price_rows) < MIN_PE_POINTS:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"无法从 Tushare 获取 {ts_code} 的数据。"
+                    "请确认 backend/.env 中 TUSHARE_TOKEN 已配置；"
+                    "daily_basic 接口约 1 次/分钟，请稍后重试。"
+                ),
+            )
+        use_price_fallback = True
+        data_source_label = "Tushare日线行情（估值接口限流，使用收盘价分位替代）"
+    else:
+        use_price_fallback = False
+        data_source_label = "Tushare估值数据 + LSTM周期模型"
 
     pe_values: List[float] = []
     pb_values: List[float] = []
     pe_history: List[Dict[str, Any]] = []
     pb_history: List[Dict[str, Any]] = []
 
-    for item in daily_basic_list:
-        pe = item.get("pe")
-        pb = item.get("pb")
-        trade_date = item.get("trade_date", "")
-        formatted_date = (
-            f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
-            if trade_date and len(trade_date) == 8
-            else trade_date
+    if use_price_fallback:
+        for item in price_rows:
+            close = item.get("close")
+            if not close or float(close) <= 0:
+                continue
+            val = float(close)
+            formatted_date = format_trade_date(str(item.get("trade_date", "")))
+            pe_values.append(val)
+            pb_values.append(round(val / 10, 2))
+            pe_history.append({"date": formatted_date, "value": round(val, 2)})
+            pb_history.append({"date": formatted_date, "value": round(val / 10, 2)})
+    else:
+        daily_basic_list = sorted(
+            daily_basic_list,
+            key=lambda x: x.get("trade_date", ""),
+            reverse=True,
         )
+        window_start = (end_date - timedelta(days=days)).strftime("%Y%m%d")
+        window_items = [
+            item for item in daily_basic_list
+            if item.get("trade_date", "") >= window_start
+        ] or daily_basic_list
 
-        if pe and pe > 0:
-            pe_values.append(float(pe))
-            pe_history.append({"date": formatted_date, "value": round(float(pe), 2)})
-        if pb and pb > 0:
-            pb_values.append(float(pb))
-            pb_history.append({"date": formatted_date, "value": round(float(pb), 2)})
+        if len(window_items) < MIN_PE_POINTS:
+            raise HTTPException(
+                status_code=503,
+                detail=f"{ts_code} 近 {days} 天估值数据不足（仅 {len(window_items)} 条），请尝试更长的时间范围",
+            )
 
-    if len(pe_values) < 10:
-        raise HTTPException(status_code=404, detail=f"{ts_code} 历史估值数据不足，无法分析")
+        for item in reversed(window_items):
+            pe = item.get("pe")
+            pb = item.get("pb")
+            formatted_date = format_trade_date(str(item.get("trade_date", "")))
+            if pe and pe > 0:
+                pe_values.append(float(pe))
+                pe_history.append({"date": formatted_date, "value": round(float(pe), 2)})
+            if pb and pb > 0:
+                pb_values.append(float(pb))
+                pb_history.append({"date": formatted_date, "value": round(float(pb), 2)})
+
+    if len(pe_values) < MIN_PE_POINTS:
+        raise HTTPException(
+            status_code=503,
+            detail=f"{ts_code} 近 {days} 天有效数据不足，无法分析",
+        )
 
     pe_30 = calculate_percentile(pe_values, 30)
     pe_70 = calculate_percentile(pe_values, 70)
     pb_30 = calculate_percentile(pb_values, 30) if pb_values else 0.0
     pb_70 = calculate_percentile(pb_values, 70) if pb_values else 0.0
-    current_pe = pe_values[0]
-    current_pb = pb_values[0] if pb_values else 0.0
+    current_pe = pe_values[-1]
+    current_pb = pb_values[-1] if pb_values else 0.0
     interval, suggestion = determine_interval(current_pe, pe_30, pe_70)
 
     stock_name = ts_code.split(".")[0]
@@ -162,10 +238,12 @@ async def analyze_pe_pb(ts_code: str, time_range: str = "3y") -> Dict[str, Any]:
         "pb_70_percentile": round(pb_70, 2),
         "interval": interval,
         "suggestion": suggestion,
-        "pe_history": pe_history[:history_limit],
-        "pb_history": pb_history[:history_limit],
+        "pe_history": pe_history[-history_limit:],
+        "pb_history": pb_history[-history_limit:],
         "time_range": time_range,
-        "data_source": "Tushare估值数据 + LSTM周期模型",
+        "lookback_days": days,
+        "data_source": data_source_label,
+        "use_price_fallback": use_price_fallback,
         "lstm_forecast": lstm_result,
         "model_routing": {
             "use_new_model": use_new,
@@ -190,12 +268,12 @@ async def analyze_pe_pb(ts_code: str, time_range: str = "3y") -> Dict[str, Any]:
 @router.post("/analyze")
 async def analyze_cycle(data: CycleAnalysisInput, db: Session = Depends(get_db)):
     """资产周期分析 - PE/PB 分位 + LSTM 价格预测"""
-    return await analyze_pe_pb(data.asset_code, data.time_range)
+    return await analyze_pe_pb(data.asset_code, data.time_range, data.lookback_days)
 
 
 @router.post("/analyze-new")
 async def analyze_cycle_new(data: CycleAnalyzeInput, db: Session = Depends(get_db)):
-    return await analyze_pe_pb(data.ts_code, "3y")
+    return await analyze_pe_pb(data.ts_code, "3y", data.lookback_days)
 
 
 @router.post("/train")

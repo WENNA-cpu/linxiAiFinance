@@ -116,17 +116,27 @@ const getPhaseText = (phase: string) => {
   return `text-${color}-600`;
 };
 
-// 根据时间范围获取数据天数
-const getDaysFromTimeRange = (range: string): number => {
-  switch (range) {
-    case '1m': return 22; // 约1个月交易日
-    case '3m': return 66; // 约3个月交易日
-    case '6m': return 132; // 约6个月交易日
-    case '1y': return 252; // 约1年交易日
-    case '3y': return 756; // 约3年交易日
-    default: return 252;
-  }
+// 时间范围 → 回溯天数（日历日）
+const LOOKBACK_DAYS: Record<string, number> = {
+  '1m': 30,
+  '3m': 90,
+  '6m': 180,
+  '1y': 365,
+  '3y': 1095,
 };
+
+const lookbackDays = computed(() => LOOKBACK_DAYS[timeRange.value] ?? 365);
+
+const timeRangeLabel = computed(() => {
+  const map: Record<string, string> = {
+    '1m': '近1个月',
+    '3m': '近3个月',
+    '6m': '近6个月',
+    '1y': '近1年',
+    '3y': '近3年',
+  };
+  return map[timeRange.value] ?? '近1年';
+});
 
 // 初始化 ECharts 图表
 const initChart = async () => {
@@ -140,10 +150,10 @@ const initChart = async () => {
 
   chartInstance = echarts.init(chartContainer.value);
 
-  // 根据时间范围过滤数据
-  const days = getDaysFromTimeRange(timeRange.value);
-  const peHistory = cycleData.value.pe_history.slice(-days);
-  const pbHistory = cycleData.value.pb_history.slice(-days);
+  const peHistory = cycleData.value.pe_history;
+  const pbHistory = cycleData.value.pb_history;
+
+  if (peHistory.length === 0) return;
 
   // 计算趋势线（简单线性回归）
   const n = peHistory.length;
@@ -273,6 +283,7 @@ const fetchCycleAnalysis = async () => {
       body: JSON.stringify({
         asset_code: tsCode,
         time_range: timeRange.value,
+        lookback_days: lookbackDays.value,
       }),
     });
 
@@ -385,6 +396,17 @@ onMounted(() => {
         <div v-if="isLoading" class="flex items-center justify-center py-20">
           <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
           <span class="ml-3 text-slate-600">加载估值数据...</span>
+        </div>
+
+        <div v-else-if="error" class="bg-red-50 border border-red-200 rounded-xl p-6 text-center">
+          <p class="text-red-800 font-medium mb-2">加载失败</p>
+          <p class="text-sm text-red-600">{{ error }}</p>
+          <button
+            @click="fetchCycleAnalysis"
+            class="mt-4 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors text-sm"
+          >
+            重试
+          </button>
         </div>
 
         <div v-else class="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -520,7 +542,7 @@ onMounted(() => {
               <div class="space-y-2 text-sm">
                 <div class="flex items-center gap-2">
                   <ClockIcon class="w-4 h-4 text-slate-400" />
-                  <span class="text-slate-600">数据区间: 近3年历史数据</span>
+                  <span class="text-slate-600">数据区间: {{ timeRangeLabel }}历史数据</span>
                 </div>
                 <div class="flex items-center gap-2">
                   <DatabaseIcon class="w-4 h-4 text-slate-400" />
