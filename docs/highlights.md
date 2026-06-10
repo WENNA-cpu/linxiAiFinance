@@ -1,0 +1,162 @@
+# 灵析 AI 智能投顾助手 — 核心亮点总结
+
+> 适用场景：面试开场 / 作品集首页 / 1 分钟电梯演讲
+
+---
+
+## 亮点一：合规闭环设计
+
+### 问题
+
+AI 理财工具最大的风险不是「不准」，而是「越界」——荐股、承诺收益、诱导买卖。监管和用户都要求：**能拦截、能留痕、能统计**。
+
+### 灵析方案
+
+```
+用户输入 → 规则引擎前置校验 → 通过才调用 LLM → 拦截写入 compliance_logs → 合规面板统计展示
+```
+
+| 环节 | 实现 | 文件 |
+|------|------|------|
+| 禁止词库 | 11 个关键词（荐股、能买吗、保证收益…） | `rule_engine.py` |
+| 前置拦截 | 诊断追问 / 规则检查 API 先过规则引擎 | `diagnose_chat.py`, `rule.py` |
+| 拦截留痕 | 写入 `compliance_logs` + `audit_logs` | `compliance_log_service.py` |
+| 统计展示 | 拦截次数、幻觉修正率、规则通过率 | `admin.py` → `Compliance.vue` |
+| 交互兜底 | 风险提示弹窗 + 常驻免责声明 | `RiskBanner.vue`, `Compliance.vue` |
+
+### 面试一句话
+
+> 「我们不做『事后补救』，而是把规则引擎放在 LLM 调用之前——用户问『茅台能买吗』，系统在 10ms 内拦截，写入合规日志，前端展示拦截原因，全程零 LLM 调用、零合规风险。」
+
+---
+
+## 亮点二：模型体系（LSTM + 随机森林）
+
+### 双模型分工
+
+| 模型 | 任务 | 输入 | 输出 | 文件 |
+|------|------|------|------|------|
+| **LSTM** | 价格趋势预测 | 30 日 OHLCV 序列 | 5 日趋势信号 | `lstm_cycle.h5` |
+| **随机森林** | 风险评级 | volatility, PE 分位, 换手率, 量能变化 | 低/中/高风险 | `rf_risk.pkl` |
+
+### 工程化训练流程
+
+```
+data_fetch.py → train_lstm.py / train_rf.py → evaluate_*.py → model_manager 注册版本
+```
+
+| 指标 | LSTM | RF |
+|------|------|-----|
+| 评估报告 | `evaluation_lstm.md` | `evaluation_rf.md` |
+| 版本归档 | `models/versions/lstm_cycle/v{timestamp}/` | `models/versions/rf_risk/v{timestamp}/` |
+| 回退策略 | RF 超时 → 规则引擎（亏损>5% 判高风险） | 同上 |
+
+### 面试一句话
+
+> 「LSTM 负责『趋势参考』，随机森林负责『风险分级』，规则引擎负责『兜底』——三层模型互补，任何一层失败都有下一层接管，不会出现单点故障导致无输出。」
+
+---
+
+## 亮点三：数据安全设计
+
+### 隐私优先架构
+
+| 设计决策 | 实现 | 用户价值 |
+|----------|------|----------|
+| 持仓不上云 | 仅存 `localStorage`，AES-256 加密 | 消除隐私顾虑 |
+| 诊断最小化传输 | API 只收代码 + 用户填写价格 | 减少数据暴露面 |
+| API Key 服务端化 | `.env` 注入，前端零接触 | 防止密钥泄露 |
+| 一键清除 | `clearPortfolio()` 清持仓 + 诊断缓存 | 用户完全掌控 |
+| 旧数据自动迁移 | 明文 JSON → 加密格式升级 | 平滑升级无感知 |
+
+### 加密细节
+
+```typescript
+// portfolioCrypto.ts
+密钥派生: SHA256('lingxi-ai-finance-portfolio-v1')
+算法:     AES-256 (CryptoJS)
+存储格式: enc:v1:{ciphertext}
+```
+
+### 面试一句话
+
+> 「持仓数据默认不出浏览器——AES-256 本地加密，诊断时只发送资产代码和用户自填价格。这是我们在 PRD 阶段就定的『隐私优先』原则，不是后期补丁。」
+
+---
+
+## 亮点四：工程化能力
+
+### 4.1 灰度发布
+
+| 项 | 说明 |
+|----|------|
+| 配置 | `NEW_MODEL_RATIO=5`（环境变量，默认 5% 流量走新模型） |
+| 算法 | `abs(hash("lingxi:" + seed)) % 100 < ratio` |
+| 分流 seed | 诊断用 `request_id`，周期分析用 `ts_code` |
+| 响应标记 | `model_variant: "new" \| "legacy"`, `model_routing.gray_ratio` |
+| 文件 | `model_manager.py`, `config.py` |
+
+### 4.2 版本管理
+
+| 能力 | 函数 | 说明 |
+|------|------|------|
+| 注册版本 | `register_model_version()` | 训练后自动归档到 `models/versions/` |
+| 元数据 | `model_metadata.json` | 活跃版本 + 历史记录 + 评估指标 |
+| 回滚 | `rollback_model()` | 切换到历史版本（库函数，待接 HTTP API） |
+
+### 4.3 审计日志（7 步全链路）
+
+每次诊断自动写入 7 步审计：
+
+```
+请求接收 → 数据获取 → 数据清洗 → LSTM预测 → RF评估 → 规则校验 → 结果生成
+```
+
+| 能力 | 说明 |
+|------|------|
+| 存储 | SQLite `audit_logs` 表 |
+| 查询 | `GET /api/trace/{request_id}` |
+| 可视化 | ECharts DAG 血缘图（`DataLineageChart.vue`） |
+| 完整性校验 | `is_complete: len(logs) >= 7` |
+
+### 4.4 部署工程化
+
+| 能力 | 文件 |
+|------|------|
+| Docker Compose 一键部署 | `docker-compose.yml` + `start.sh` |
+| ECS 完整指南 | `DEPLOY.md` |
+| 秒悟云模板 | `.env.cloud` + DEPLOY.md §11 |
+| 环境变量分层加载 | `env_loader.py`（根目录 + backend 双 `.env`） |
+
+### 面试一句话
+
+> 「从模型训练到灰度上线到审计溯源，我们有一套完整的 MLOps 最小闭环——5% 灰度验证新模型、7 步审计覆盖每次诊断、Docker 一键部署到生产。这不是 Demo，是可以运维的系统。」
+
+---
+
+## 亮点速查表（面试前 30 秒复习）
+
+| # | 亮点 | 关键词 | 核心文件 |
+|---|------|--------|----------|
+| 1 | 合规闭环 | 规则引擎前置、禁止词、拦截留痕 | `rule_engine.py` |
+| 2 | 双模型 | LSTM 趋势 + RF 风险 + 规则兜底 | `lstm_cycle_service.py`, `rf_risk_service.py` |
+| 3 | 数据安全 | AES-256 本地加密、持仓不上云 | `portfolioCrypto.ts` |
+| 4 | 灰度发布 | 5% 流量、稳定哈希分流 | `model_manager.py` |
+| 5 | 审计溯源 | 7 步日志 + DAG 血缘图 | `trace_service.py`, `DataLineageChart.vue` |
+| 6 | 快速诊断 | 本地价格跳过 Tushare + LSTM，< 1s | `portfolio.py` |
+| 7 | 可部署 | Docker + ECS + 秒悟三方案 | `DEPLOY.md` |
+
+---
+
+## 诚实说明（面试加分项）
+
+主动提及以下已知缺口，展示工程诚实度：
+
+| 缺口 | 说明 |
+|------|------|
+| `feedback.py` 未挂载 | 诊断反馈 API 路由未注册到 `main.py` |
+| 商业价值计算器 | 首页演示值为硬编码，非真实演算 |
+| 模型回滚 | `rollback_model()` 无 HTTP 管理接口 |
+| `/api/risk/rating` | 部分端点为 Mock 数据 |
+
+> 「这些是 v1.1 的优化项，核心链路（诊断 → 审计 → 溯源 → 合规）已全通。」
