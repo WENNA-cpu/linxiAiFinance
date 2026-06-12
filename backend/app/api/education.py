@@ -4,7 +4,7 @@ from typing import Optional, List
 from pydantic import BaseModel, Field
 
 from app.models.database import get_db
-from app.services.education_service import list_courses, get_course
+from app.services.education_service import list_courses, get_course, get_courses_updated_at
 from app.services.deepseek_service import answer_education_question
 
 router = APIRouter()
@@ -54,7 +54,8 @@ async def get_courses(
         "category": category or "all",
         "courses": courses,
         "total": len(courses),
-        "data_source": "投教知识库",
+        "updated_at": get_courses_updated_at(),
+        "data_source": "投教知识库（courses_full.json）",
     }
 
 
