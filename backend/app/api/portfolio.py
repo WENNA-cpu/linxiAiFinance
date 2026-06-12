@@ -186,11 +186,11 @@ async def _run_lstm_trend(assets: List, asset_quotes: dict, request_id: str) -> 
     forecasts = []
     for asset in assets[:10]:
         ts_code = _normalize_ts_code(asset.code)
-        history = await fetch_asset_history(ts_code, days=120)
+        history = await fetch_asset_history(ts_code, days=320)
         closes = [float(r["close"]) for r in history if r.get("close")]
         if len(closes) < 30:
             continue
-        pred = predictor.predict(closes)
+        pred = predictor.predict(close_prices=closes, history=history)
         if pred.get("available"):
             forecasts.append({"code": asset.code, "name": asset.name, **pred})
             if pred.get("trend") == "up":

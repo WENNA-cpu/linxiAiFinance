@@ -16,7 +16,8 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from training.config import DATA_DIR, HS300_INDEX, SKIP_DAILY_BASIC, STOCK_LIMIT, TRAIN_YEARS
-from training.tushare_client import fetch_hs300_members, query
+from training.feature_engineering import enrich_stock_features
+from training.tushare_client import fetch_hs300_members, load_daily_basic_cache, query, save_daily_basic_cache
 
 
 def _date_range(years: int) -> tuple[str, str]:
@@ -34,12 +35,17 @@ def fetch_stock_daily(ts_code: str, start_date: str, end_date: str) -> pd.DataFr
 
 
 def fetch_stock_valuation(ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+    cached = load_daily_basic_cache(ts_code, start_date, end_date)
+    if not cached.empty:
+        return cached
     try:
         df = query("daily_basic", {"ts_code": ts_code, "start_date": start_date, "end_date": end_date})
         if df.empty:
             return df
         keep = [c for c in ["trade_date", "pe", "pb", "ps", "turnover_rate", "total_mv"] if c in df.columns]
-        return df[keep].sort_values("trade_date").reset_index(drop=True)
+        out = df[keep].sort_values("trade_date").reset_index(drop=True)
+        save_daily_basic_cache(ts_code, out)
+        return out
     except Exception as e:
         print(f"    [估值] {ts_code} 跳过: {e}")
         return pd.DataFrame()
@@ -90,6 +96,7 @@ def prepare_training_data(
                 print("跳过(数据不足)")
                 continue
             merged["ts_code"] = code
+            merged = enrich_stock_features(merged)
             frames.append(merged)
             print(f"OK ({len(merged)} 行)")
         except Exception as e:

@@ -9,6 +9,7 @@ from app.models.database import get_db
 from app.services.ai_service import AIService, ModelTrainingService
 from app.services.data_service import DataService
 from app.services.lstm_cycle_service import get_lstm_predictor
+from app.api.portfolio import fetch_asset_history
 from app.services.model_manager import should_use_new_model
 from app.config import NEW_MODEL_RATIO
 
@@ -84,11 +85,12 @@ async def fetch_close_prices(ts_code: str, days: int = 365 * 3) -> List[float]:
 
 
 async def run_lstm_forecast(ts_code: str, use_new: bool) -> Dict[str, Any]:
-    closes = await fetch_close_prices(ts_code)
+    history = await fetch_asset_history(ts_code, days=320)
+    closes = [float(r["close"]) for r in history if r.get("close")]
     if len(closes) < 30:
         return {"available": False, "reason": "收盘价历史不足"}
     predictor = get_lstm_predictor(use_new=use_new)
-    result = predictor.predict(closes)
+    result = predictor.predict(close_prices=closes, history=history)
     result["model_variant"] = "new" if use_new else "legacy"
     return result
 
