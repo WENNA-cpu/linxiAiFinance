@@ -1,12 +1,13 @@
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 _COURSES_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "courses_full.json"
 
 
-def _load_courses() -> List[Dict[str, Any]]:
-    """每次从 JSON 文件读取，避免空缓存导致列表为空"""
+def _load_courses_raw() -> List[Dict[str, Any]]:
+    """每次从 JSON 文件读取，方便后台直接更新文件后即时生效"""
     if not _COURSES_PATH.exists():
         print(f"[Education] 课程文件不存在: {_COURSES_PATH}")
         return []
@@ -18,6 +19,17 @@ def _load_courses() -> List[Dict[str, Any]]:
     except Exception as e:
         print(f"[Education] 读取课程文件失败: {e}")
         return []
+
+
+def get_courses_updated_at() -> Optional[str]:
+    if not _COURSES_PATH.exists():
+        return None
+    mtime = _COURSES_PATH.stat().st_mtime
+    return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+
+
+def _load_courses() -> List[Dict[str, Any]]:
+    return _load_courses_raw()
 
 
 def list_courses(category: Optional[str] = None) -> List[Dict[str, Any]]:
