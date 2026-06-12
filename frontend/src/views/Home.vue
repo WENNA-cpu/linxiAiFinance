@@ -125,14 +125,35 @@ const calculator = ref({
   timeSaved: 0,
   holdingDays: 0,
   lossAvoided: 0,
+  source: '',
+  loading: false,
 });
 
-const calculateValue = () => {
-  calculator.value = {
-    timeSaved: 156,
-    holdingDays: 23,
-    lossAvoided: 8500,
-  };
+const calculateValue = async () => {
+  calculator.value.loading = true;
+  try {
+    const response = await fetch('/api/value/stats');
+    if (!response.ok) {
+      throw new Error(`获取价值统计失败: ${response.status}`);
+    }
+    const data = await response.json();
+    calculator.value = {
+      timeSaved: data.time_saved_hours ?? 156,
+      holdingDays: data.holding_days ?? 23,
+      lossAvoided: data.loss_avoided ?? 8500,
+      source: data.source ?? '',
+      loading: false,
+    };
+  } catch (err) {
+    console.error('[商业价值]', err);
+    calculator.value = {
+      timeSaved: 156,
+      holdingDays: 23,
+      lossAvoided: 8500,
+      source: '演示估算模型（接口暂不可用）',
+      loading: false,
+    };
+  }
 };
 
 const goToPortfolioImport = () => {
@@ -188,8 +209,8 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="min-h-screen bg-slate-50">
-    <header class="bg-white border-b border-slate-200">
+  <div class="home-page min-h-screen bg-slate-50">
+    <header class="home-header bg-white border-b border-slate-200">
       <div class="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
         <div class="flex items-center gap-3">
           <div class="w-10 h-10 bg-indigo-600 rounded-lg flex items-center justify-center">
@@ -219,35 +240,36 @@ onMounted(() => {
       </div>
     </header>
 
-    <main class="max-w-7xl mx-auto px-4">
-      <div class="text-center min-h-[50vh] flex flex-col items-center justify-center relative py-16">
-        <div class="absolute inset-0 flex items-center justify-center pointer-events-none overflow-hidden">
-          <div class="absolute left-[10%] top-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-purple-200/50 rounded-full blur-3xl"></div>
-          <div class="absolute right-[10%] top-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-blue-200/50 rounded-full blur-3xl"></div>
-        </div>
-        <div class="relative z-10">
-          <div class="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-full text-sm text-slate-600 mb-6">
-            <SparklesIcon class="w-4 h-4 text-indigo-500" />
-            AI驱动的智能投资助手
+    <main class="home-main max-w-7xl mx-auto px-4 w-full">
+      <section class="hero-section">
+        <div class="hero-banner text-center flex flex-col items-center justify-center relative">
+          <div class="absolute inset-0 flex items-center justify-center pointer-events-none overflow-hidden">
+            <div class="absolute left-[10%] top-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-purple-200/50 rounded-full blur-3xl"></div>
+            <div class="absolute right-[10%] top-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-blue-200/50 rounded-full blur-3xl"></div>
           </div>
-          <h2 class="text-5xl font-bold mb-6">
-            <span class="text-slate-900">让AI为您的投资</span>
-            <span class="text-violet-600">保驾护航</span>
-          </h2>
-          <p class="text-lg text-slate-500 max-w-2xl mx-auto mb-8">
-            灵析结合大语言模型与金融数据分析，为您提供专业的持仓诊断、周期分析与投资教育服务
-          </p>
-          <button
-            @click="goToPortfolioImport"
-            class="inline-flex items-center gap-2 px-10 py-4 bg-gradient-to-r from-indigo-600 to-blue-600 text-white text-lg font-medium rounded-full hover:from-indigo-700 hover:to-blue-700 transition-all shadow-lg shadow-indigo-200 hover:shadow-xl hover:shadow-indigo-300"
-          >
-            开始持仓诊断
-            <ArrowRightIcon class="w-5 h-5" />
-          </button>
+          <div class="relative z-10">
+            <div class="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-full text-sm text-slate-600 mb-6">
+              <SparklesIcon class="w-4 h-4 text-indigo-500" />
+              AI驱动的智能投资助手
+            </div>
+            <h2 class="text-5xl font-bold mb-6">
+              <span class="text-slate-900">让AI为您的投资</span>
+              <span class="text-violet-600">保驾护航</span>
+            </h2>
+            <p class="text-lg text-slate-500 max-w-2xl mx-auto mb-8">
+              灵析结合大语言模型与金融数据分析，为您提供专业的持仓诊断、周期分析与投资教育服务
+            </p>
+            <button
+              @click="goToPortfolioImport"
+              class="inline-flex items-center gap-2 px-10 py-4 bg-gradient-to-r from-indigo-600 to-blue-600 text-white text-lg font-medium rounded-full hover:from-indigo-700 hover:to-blue-700 transition-all shadow-lg shadow-indigo-200 hover:shadow-xl hover:shadow-indigo-300"
+            >
+              开始持仓诊断
+              <ArrowRightIcon class="w-5 h-5" />
+            </button>
+          </div>
         </div>
-      </div>
 
-      <div class="bg-white rounded-2xl border border-slate-200 p-6 mb-8">
+        <div class="market-sentiment-panel bg-white rounded-2xl border border-slate-200 p-6">
         <div class="flex items-center justify-between mb-6">
           <div class="flex items-center gap-2">
             <ActivityIcon class="w-5 h-5 text-indigo-600" />
@@ -293,8 +315,11 @@ onMounted(() => {
             </div>
           </div>
         </div>
-      </div>
+        </div>
+      </section>
 
+      <div class="home-content-below">
+      <h2 class="home-features-title">核心功能</h2>
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
         <div
           v-for="feature in features"
@@ -359,9 +384,10 @@ onMounted(() => {
           </div>
         </div>
       </div>
+      </div>
     </main>
 
-    <footer class="bg-white border-t border-slate-200 py-6">
+    <footer class="home-footer bg-white border-t border-slate-200 py-6">
       <div class="max-w-7xl mx-auto px-4 text-center">
         <p class="text-sm text-slate-500">
           历史收益不代表未来表现 · AI无法预测市场 · 本内容仅为投资参考，不构成任何投资建议
@@ -376,7 +402,10 @@ onMounted(() => {
     >
       <div class="bg-white rounded-xl p-6 w-full max-w-md mx-4">
         <h3 class="text-lg font-semibold text-slate-900 mb-4">商业价值计算器</h3>
-        <div v-if="calculator.timeSaved === 0" class="text-center py-8">
+        <div v-if="calculator.loading" class="text-center py-8">
+          <p class="text-slate-500">正在计算价值估算...</p>
+        </div>
+        <div v-else-if="calculator.timeSaved === 0" class="text-center py-8">
           <p class="text-slate-500 mb-4">点击计算，查看灵析为您带来的价值</p>
           <button
             @click="calculateValue"
@@ -386,6 +415,7 @@ onMounted(() => {
           </button>
         </div>
         <div v-else class="space-y-4">
+          <p v-if="calculator.source" class="text-xs text-slate-400 text-center">{{ calculator.source }}</p>
           <div class="p-4 bg-slate-50 rounded-lg">
             <p class="text-sm text-slate-500">预计节省时间</p>
             <p class="text-2xl font-bold text-indigo-600">{{ calculator.timeSaved }}小时/年</p>
@@ -409,3 +439,110 @@ onMounted(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.home-page {
+  --home-header-h: 4.5rem;
+  min-height: 100dvh;
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+}
+
+.home-header {
+  flex-shrink: 0;
+  min-height: var(--home-header-h);
+}
+
+.home-footer {
+  flex-shrink: 0;
+  margin-top: auto;
+}
+
+.home-main {
+  flex: 1 0 auto;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+/* 首屏：Banner + 市场情绪简报撑满 header 以下区域，简报贴底并留出底部留白 */
+.hero-section {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  height: calc(100dvh - var(--home-header-h));
+  height: calc(100svh - var(--home-header-h));
+  box-sizing: border-box;
+  padding-bottom: clamp(1rem, 2.5vh, 1.75rem);
+}
+
+.hero-banner {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: clamp(1.25rem, 3vh, 2.5rem) 0 clamp(0.75rem, 2vh, 1.5rem);
+}
+
+.market-sentiment-panel {
+  flex-shrink: 0;
+  margin-top: auto;
+}
+
+.home-content-below {
+  flex-shrink: 0;
+  padding-top: clamp(0.75rem, 2vh, 1.25rem);
+  padding-bottom: 1.5rem;
+}
+
+.home-features-title {
+  text-align: center;
+  font-size: 1.5rem;
+  line-height: 2rem;
+  font-weight: 700;
+  color: rgb(15 23 42);
+  margin-bottom: 2rem;
+}
+
+@media (max-width: 1024px) {
+  .hero-banner h2 {
+    font-size: 2.25rem;
+    line-height: 2.5rem;
+  }
+}
+
+@media (max-width: 768px) {
+  .home-page {
+    --home-header-h: 4rem;
+  }
+
+  .hero-banner h2 {
+    font-size: 1.875rem;
+    line-height: 2.25rem;
+  }
+
+  .market-sentiment-panel .grid {
+    gap: 1.25rem;
+  }
+
+  .home-features-title {
+    font-size: 1.375rem;
+    margin-bottom: 1.5rem;
+  }
+}
+
+@media (max-width: 640px) {
+  .market-sentiment-panel .grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 矮屏：允许 hero 增高，避免 Banner 内容被裁切 */
+@media (max-height: 720px) {
+  .hero-section {
+    height: auto;
+    min-height: calc(100dvh - var(--home-header-h));
+    min-height: calc(100svh - var(--home-header-h));
+  }
+}
+</style>

@@ -1,9 +1,19 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
+from pydantic import BaseModel, Field, ConfigDict
 
 from app.models.database import get_db
 from app.models.portfolio import AIOutputLog, UserFeedback, AuditLog, ComplianceLog
+from app.services.model_manager import (
+    normalize_model_type,
+    resolve_target_version,
+    rollback_model,
+    update_runtime_version,
+    get_active_version,
+)
+from app.services.lstm_cycle_service import reload_lstm_predictors
+from app.services.rf_risk_service import reload_rf_predictor
 
 router = APIRouter()
 
@@ -138,3 +148,41 @@ async def get_feedback(db: Session = Depends(get_db)):
 @router.post("/feedback/export")
 async def export_feedback(db: Session = Depends(get_db)):
     return {"message": "反馈数据导出功能", "format": "Excel"}
+
+
+class ModelRollbackRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    model_type: str = Field(..., description="lstm 或 rf")
+    target_version: str = Field(..., description="目标版本，如 v20260608_090710")
+
+
+@router.post("/model/rollback")
+async def rollback_model_version(body: ModelRollbackRequest):
+    """
+    模型版本回滚：恢复归档文件、更新 model_runtime.json、热重载推理服务。
+    """
+    try:
+        model_type = normalize_model_type(body.model_type)
+        version = resolve_target_version(model_type, body.target_version)
+        target = rollback_model(model_type, version)
+        runtime = update_runtime_version(model_type, version)
+
+        if model_type == "lstm_cycle":
+            reload_lstm_predictors()
+        else:
+            reload_rf_predictor()
+
+        return {
+            "success": True,
+            "message": f"{body.model_type} 已回滚至 {version}",
+            "model_type": model_type,
+            "target_version": version,
+            "active": get_active_version(model_type),
+            "runtime_config": runtime,
+            "reloaded": True,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"回滚失败: {e}") from e

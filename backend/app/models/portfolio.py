@@ -58,7 +58,8 @@ class UserFeedback(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     feedback_id = Column(String, unique=True, index=True)
-    output_id = Column(String, ForeignKey("ai_output_logs.output_id"))
+    request_id = Column(String, index=True, nullable=True)
+    output_id = Column(String, ForeignKey("ai_output_logs.output_id"), nullable=True)
     feedback_type = Column(String)  # positive, negative
     reason = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

@@ -107,3 +107,9 @@ def get_rf_predictor() -> RFRiskPredictor:
     if _rf_predictor is None:
         _rf_predictor = RFRiskPredictor()
     return _rf_predictor
+
+
+def reload_rf_predictor() -> None:
+    """回滚或热更新后清空缓存，下次推理重新加载模型文件"""
+    global _rf_predictor
+    _rf_predictor = None

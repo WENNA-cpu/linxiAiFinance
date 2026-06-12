@@ -84,3 +84,10 @@ def get_lstm_predictor(use_new: bool = True) -> LSTMCyclePredictor:
     if _lstm_legacy is None:
         _lstm_legacy = LSTMCyclePredictor(model_path=LSTM_LEGACY_MODEL, scaler_path=LSTM_LEGACY_MODEL.replace(".h5", "_scaler.json"))
     return _lstm_legacy
+
+
+def reload_lstm_predictors() -> None:
+    """回滚或热更新后清空缓存，下次推理重新加载模型文件"""
+    global _lstm_new, _lstm_legacy
+    _lstm_new = None
+    _lstm_legacy = None
