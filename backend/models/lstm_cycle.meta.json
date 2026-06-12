@@ -1,10 +1,18 @@
 {
-  "train_samples": 168,
-  "test_samples": 42,
-  "epochs_trained": 5,
-  "final_loss": 0.03360246866941452,
-  "final_val_loss": 0.008721645921468735,
+  "train_samples": 18802,
+  "test_samples": 4701,
+  "epochs_trained": 10,
+  "final_loss": 0.0004407936939969659,
+  "final_val_loss": 0.0001645983284106478,
   "model_path": "E:\\linxiAiFinance\\backend\\models\\lstm_cycle.h5",
   "scaler_path": "E:\\linxiAiFinance\\backend\\models\\lstm_cycle_scaler.pkl",
-  "loss_plot": "E:\\linxiAiFinance\\backend\\models\\reports\\lstm_loss_curve.png"
+  "loss_plot": "E:\\linxiAiFinance\\backend\\models\\reports\\lstm_loss_curve.png",
+  "features": [
+    "close",
+    "pct_chg",
+    "vol",
+    "pe_pct",
+    "pb_pct"
+  ],
+  "percentile_window": 252
 }

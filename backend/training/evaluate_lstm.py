@@ -3,6 +3,7 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
 
 import joblib
 import numpy as np
@@ -18,49 +19,90 @@ if str(BACKEND) not in sys.path:
 
 from training.config import (
     LSTM_EVAL_REPORT,
+    LSTM_FEATURE_NAMES,
     LSTM_MODEL_PATH,
+    LSTM_N_FEATURES,
     LSTM_PRED_LEN,
     LSTM_SCALER_PATH,
     LSTM_SEQ_LEN,
+    PERCENTILE_WINDOW,
     STOCK_LIMIT,
     TRAIN_YEARS,
 )
 from training.data_fetch import prepare_training_data
+from training.feature_engineering import build_feature_matrix
 from training.train_lstm import build_sequences
 
 
-def evaluate_lstm(stock_limit: int = STOCK_LIMIT, years: int = TRAIN_YEARS) -> dict:
-    if not LSTM_MODEL_PATH.exists():
-        raise FileNotFoundError(f"未找到模型 {LSTM_MODEL_PATH}，请先运行 train_lstm.py")
+def _load_scalers(scaler_path: Path) -> Tuple[Any, MinMaxScaler, int]:
+    bundle = joblib.load(scaler_path)
+    if isinstance(bundle, dict) and "feature_scaler" in bundle:
+        return bundle["feature_scaler"], bundle["target_scaler"], bundle.get("n_features", LSTM_N_FEATURES)
+    legacy = bundle
+    return legacy, legacy, 1
 
-    model = load_model(LSTM_MODEL_PATH, compile=False)
-    scaler: MinMaxScaler = joblib.load(LSTM_SCALER_PATH)
 
+def _prepare_dataset(stock_limit: int, years: int, multi_feature: bool):
     df = prepare_training_data(stock_limit=stock_limit, years=years)
     df["close"] = pd.to_numeric(df["close"], errors="coerce")
     df = df.dropna(subset=["close"])
 
     x_all, y_all = [], []
+    min_len = LSTM_SEQ_LEN + LSTM_PRED_LEN + (PERCENTILE_WINDOW // 2 if multi_feature else 10)
     for _, group in df.groupby("ts_code"):
-        closes = group["close"].astype(float).values
-        if len(closes) < LSTM_SEQ_LEN + LSTM_PRED_LEN + 10:
+        if len(group) < min_len:
             continue
-        x, y = build_sequences(closes, LSTM_SEQ_LEN, LSTM_PRED_LEN)
+        if multi_feature:
+            try:
+                matrix = build_feature_matrix(group)
+            except ValueError:
+                continue
+            x, y = build_sequences(matrix, LSTM_SEQ_LEN, LSTM_PRED_LEN)
+        else:
+            closes = group["close"].astype(float).values
+            x_list, y_list = [], []
+            for i in range(LSTM_SEQ_LEN, len(closes) - LSTM_PRED_LEN + 1):
+                x_list.append(closes[i - LSTM_SEQ_LEN:i])
+                y_list.append(closes[i:i + LSTM_PRED_LEN])
+            x, y = np.array(x_list), np.array(y_list)
         if len(x):
             x_all.append(x)
             y_all.append(y)
 
     X = np.concatenate(x_all, axis=0)
     Y = np.concatenate(y_all, axis=0)
-    X_scaled = scaler.transform(X.reshape(-1, 1)).reshape(X.shape[0], LSTM_SEQ_LEN, 1)
-    Y_scaled = scaler.transform(Y.reshape(-1, 1)).reshape(Y.shape)
+    return X, Y
 
+
+def evaluate_lstm(
+    stock_limit: int = STOCK_LIMIT,
+    years: int = TRAIN_YEARS,
+    model_path: Optional[Path] = None,
+    scaler_path: Optional[Path] = None,
+) -> dict:
+    model_path = model_path or LSTM_MODEL_PATH
+    scaler_path = scaler_path or LSTM_SCALER_PATH
+    if not model_path.exists():
+        raise FileNotFoundError(f"未找到模型 {model_path}，请先运行 train_lstm.py")
+
+    model = load_model(model_path, compile=False)
+    feature_scaler, target_scaler, n_features = _load_scalers(scaler_path)
+    multi_feature = n_features > 1
+
+    X, Y = _prepare_dataset(stock_limit, years, multi_feature=multi_feature)
+
+    if multi_feature:
+        n_samples, seq_len, nf = X.shape
+        X_scaled = feature_scaler.transform(X.reshape(-1, nf)).reshape(n_samples, seq_len, nf)
+    else:
+        X_scaled = feature_scaler.transform(X.reshape(-1, 1)).reshape(X.shape[0], LSTM_SEQ_LEN, 1)
+
+    Y_scaled = target_scaler.transform(Y.reshape(-1, 1)).reshape(Y.shape)
     _, X_test, _, y_test = train_test_split(X_scaled, Y_scaled, test_size=0.2, random_state=42)
     pred_scaled = model.predict(X_test, verbose=0)
 
-    # 反归一化
-    y_true = scaler.inverse_transform(y_test.reshape(-1, 1)).reshape(y_test.shape)
-    y_pred = scaler.inverse_transform(pred_scaled.reshape(-1, 1)).reshape(pred_scaled.shape)
+    y_true = target_scaler.inverse_transform(y_test.reshape(-1, 1)).reshape(y_test.shape)
+    y_pred = target_scaler.inverse_transform(pred_scaled.reshape(-1, 1)).reshape(pred_scaled.shape)
 
     rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
     mae = float(mean_absolute_error(y_true, y_pred))
@@ -70,9 +112,10 @@ def evaluate_lstm(stock_limit: int = STOCK_LIMIT, years: int = TRAIN_YEARS) -> d
 生成时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
 ## 模型信息
-- 模型路径: `{LSTM_MODEL_PATH}`
+- 模型路径: `{model_path}`
 - 输入窗口: {LSTM_SEQ_LEN} 天
 - 预测步长: {LSTM_PRED_LEN} 天
+- 输入特征: {LSTM_FEATURE_NAMES if multi_feature else ["close"]}
 - 测试样本: {len(X_test)}
 
 ## 评估指标
@@ -83,13 +126,15 @@ def evaluate_lstm(stock_limit: int = STOCK_LIMIT, years: int = TRAIN_YEARS) -> d
 
 ## 说明
 - RMSE/MAE 基于反归一化后的收盘价（元）计算
-- 测试集为随机 20%  hold-out，random_state=42
+- 测试集为随机 20% hold-out，random_state=42
 """
-    LSTM_EVAL_REPORT.parent.mkdir(parents=True, exist_ok=True)
-    LSTM_EVAL_REPORT.write_text(report, encoding="utf-8")
+    if model_path == LSTM_MODEL_PATH:
+        LSTM_EVAL_REPORT.parent.mkdir(parents=True, exist_ok=True)
+        LSTM_EVAL_REPORT.write_text(report, encoding="utf-8")
+        print(f"[评估] 报告: {LSTM_EVAL_REPORT}")
+
     print(f"[评估] RMSE={rmse:.4f}, MAE={mae:.4f}")
-    print(f"[评估] 报告: {LSTM_EVAL_REPORT}")
-    return {"rmse": rmse, "mae": mae, "report": str(LSTM_EVAL_REPORT)}
+    return {"rmse": rmse, "mae": mae, "report": str(LSTM_EVAL_REPORT), "n_features": n_features}
 
 
 def main() -> None:
