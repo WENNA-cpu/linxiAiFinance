@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
+import * as XLSX from 'xlsx';
 import { usePortfolioStore } from '@/stores/portfolio';
 import RiskBanner from '@/components/RiskBanner.vue';
 import UploadIcon from '@/components/icons/UploadIcon.vue';
@@ -44,7 +45,7 @@ const handleImport = () => {
   submitPortfolio();
 };
 
-const submitPortfolio = () => {
+const submitPortfolio = async () => {
     const validAssets = manualAssets.value.filter(a => a.code && a.name && a.quantity > 0);
     const assets = validAssets.map(a => ({
       code: a.code,
@@ -52,8 +53,8 @@ const submitPortfolio = () => {
       type: a.type as 'stock' | 'fund' | 'bond' | 'other',
       quantity: a.quantity,
       costPrice: a.costPrice,
-      currentPrice: a.costPrice * (1 + (Math.random() - 0.3) * 0.2),
-      marketValue: a.quantity * a.costPrice * (1 + (Math.random() - 0.3) * 0.2),
+      currentPrice: 0,
+      marketValue: a.quantity * a.costPrice,
     }));
     const totalCost = assets.reduce((sum, a) => sum + a.quantity * a.costPrice, 0);
     const totalValue = assets.reduce((sum, a) => sum + a.marketValue, 0);
@@ -67,6 +68,7 @@ const submitPortfolio = () => {
 
     // 保存到本地 store（AES-256 加密写入 localStorage）
     portfolioStore.setPortfolio(portfolio);
+    await portfolioStore.refreshLiveQuotes();
 
     router.push('/portfolio/diagnosis');
 };
@@ -78,30 +80,183 @@ const confirmSecurity = () => {
   }
 };
 
-// 下载Excel模板
+const FORMAT_UNSUPPORTED_MSG = '文件格式不支持，请使用下载的模板';
+
+type ParsedAsset = {
+  code: string;
+  name: string;
+  type: string;
+  quantity: number;
+  costPrice: number;
+};
+
+const TYPE_MAP: Record<string, string> = {
+  股票: 'stock',
+  基金: 'fund',
+  债券: 'bond',
+  ETF: 'fund',
+  etf: 'fund',
+  其他: 'other',
+  stock: 'stock',
+  fund: 'fund',
+  bond: 'bond',
+  other: 'other',
+};
+
+const normalizeCell = (value: unknown): string =>
+  String(value ?? '').trim().replace(/^\uFEFF/, '');
+
+const normalizeHeader = (value: unknown): string => normalizeCell(value).toLowerCase();
+
+const findColumnIndex = (headers: string[], matchers: string[]): number =>
+  headers.findIndex((header) => {
+    const normalized = normalizeHeader(header);
+    return matchers.some(
+      (matcher) => normalized.includes(matcher.toLowerCase()) || normalized === matcher.toLowerCase(),
+    );
+  });
+
+const toNumber = (value: unknown): number | null => {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'number' && !Number.isNaN(value)) return value;
+  const parsed = Number(String(value).replace(/,/g, '').trim());
+  return Number.isNaN(parsed) ? null : parsed;
+};
+
+const rowsFromWorkbook = (workbook: XLSX.WorkBook): unknown[][] => {
+  const sheetName = workbook.SheetNames[0];
+  if (!sheetName) return [];
+  const sheet = workbook.Sheets[sheetName];
+  return XLSX.utils.sheet_to_json(sheet, {
+    header: 1,
+    defval: '',
+    blankrows: false,
+    raw: false,
+  }) as unknown[][];
+};
+
+const parseRowsFromMatrix = (rows: unknown[][]): ParsedAsset[] | { error: string } => {
+  const nonEmptyRows = rows.filter(
+    (row) => Array.isArray(row) && row.some((cell) => normalizeCell(cell) !== ''),
+  );
+
+  if (nonEmptyRows.length < 2) {
+    return { error: FORMAT_UNSUPPORTED_MSG };
+  }
+
+  const headers = nonEmptyRows[0].map((cell) => normalizeCell(cell));
+  const codeIndex = findColumnIndex(headers, ['代码', 'code', '证券代码']);
+  const nameIndex = findColumnIndex(headers, ['名称', 'name', '证券名称']);
+  const typeIndex = findColumnIndex(headers, ['类型', 'type']);
+  const quantityIndex = findColumnIndex(headers, ['数量', 'quantity', '持仓数量']);
+  const costPriceIndex = findColumnIndex(headers, ['成本价', '成本', 'cost', '买入价']);
+
+  if (codeIndex === -1 || nameIndex === -1) {
+    return { error: FORMAT_UNSUPPORTED_MSG };
+  }
+
+  const assets: ParsedAsset[] = [];
+  for (let i = 1; i < nonEmptyRows.length; i += 1) {
+    const rowNum = i + 1;
+    const cells = nonEmptyRows[i].map((cell) => normalizeCell(cell));
+    const code = cells[codeIndex] ?? '';
+    if (!code) continue;
+
+    const quantityValue = quantityIndex >= 0 ? toNumber(nonEmptyRows[i][quantityIndex]) : null;
+    const costValue = costPriceIndex >= 0 ? toNumber(nonEmptyRows[i][costPriceIndex]) : null;
+
+    if (quantityIndex >= 0 && normalizeCell(nonEmptyRows[i][quantityIndex]) && quantityValue === null) {
+      return { error: `第 ${rowNum} 行数据格式错误` };
+    }
+    if (costPriceIndex >= 0 && normalizeCell(nonEmptyRows[i][costPriceIndex]) && costValue === null) {
+      return { error: `第 ${rowNum} 行数据格式错误` };
+    }
+
+    const typeLabel = typeIndex >= 0 ? normalizeCell(nonEmptyRows[i][typeIndex]) : '';
+    assets.push({
+      code,
+      name: cells[nameIndex] ?? '',
+      type: TYPE_MAP[typeLabel] || TYPE_MAP[typeLabel.toLowerCase()] || 'stock',
+      quantity: quantityValue ?? 0,
+      costPrice: costValue ?? 0,
+    });
+  }
+
+  if (assets.length === 0) {
+    return { error: FORMAT_UNSUPPORTED_MSG };
+  }
+
+  return assets;
+};
+
+const readWorkbookFromFile = (file: File): Promise<XLSX.WorkBook> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    const lowerName = file.name.toLowerCase();
+    const isCsv = lowerName.endsWith('.csv');
+
+    reader.onload = (event) => {
+      try {
+        const result = event.target?.result;
+        if (!result) {
+          reject(new Error('empty file'));
+          return;
+        }
+
+        const workbook = isCsv
+          ? XLSX.read(result as string, {
+              type: 'string',
+              raw: false,
+              codepage: 65001,
+            })
+          : XLSX.read(new Uint8Array(result as ArrayBuffer), {
+              type: 'array',
+              cellDates: true,
+              cellNF: false,
+              cellText: false,
+              raw: false,
+            });
+
+        resolve(workbook);
+      } catch (error) {
+        reject(error);
+      }
+    };
+
+    reader.onerror = () => reject(new Error('read failed'));
+
+    if (isCsv) {
+      reader.readAsText(file, 'UTF-8');
+    } else {
+      reader.readAsArrayBuffer(file);
+    }
+  });
+
+const applyParsedAssets = (assets: ParsedAsset[]) => {
+  parsedAssets.value = assets;
+  manualAssets.value = assets.map((asset) => ({
+    code: asset.code,
+    name: asset.name,
+    type: asset.type,
+    quantity: asset.quantity,
+    costPrice: asset.costPrice,
+  }));
+  showParseSuccess(assets.length);
+};
+
+// 下载 Excel 模板（标准 .xlsx）
 const downloadTemplate = () => {
-  // 模板数据
   const templateData = [
     ['代码', '名称', '类型', '数量', '成本价'],
-    ['000001', '平安银行', '股票', '100', '15.50'],
-    ['600519', '贵州茅台', '股票', '10', '1500.00'],
-    ['510050', '上证50ETF', 'ETF', '500', '2.80'],
+    ['000001', '平安银行', '股票', 100, 15.5],
+    ['600519', '贵州茅台', '股票', 10, 1500],
+    ['510050', '上证50ETF', 'ETF', 500, 2.8],
   ];
 
-  // 创建CSV内容
-  const csvContent = templateData.map(row => row.join(',')).join('\n');
-
-  // 添加BOM以支持中文
-  const BOM = '\uFEFF';
-  const blob = new Blob([BOM + csvContent], { type: 'text/csv;charset=utf-8;' });
-
-  // 创建下载链接
-  const link = document.createElement('a');
-  link.href = URL.createObjectURL(blob);
-  link.download = '持仓导入模板.csv';
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
+  const worksheet = XLSX.utils.aoa_to_sheet(templateData);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, '持仓导入');
+  XLSX.writeFile(workbook, '持仓导入模板.xlsx');
 };
 
 // 文件上传相关
@@ -196,93 +351,30 @@ const handleFileChange = (event: Event) => {
   parseFile(file);
 };
 
-// 解析 CSV/Excel 文件
-const parseFile = (file: File) => {
-  const reader = new FileReader();
+// 解析 CSV / Excel 文件
+const parseFile = async (file: File) => {
+  const lowerName = file.name.toLowerCase();
+  const supported = lowerName.endsWith('.xlsx') || lowerName.endsWith('.xls') || lowerName.endsWith('.csv');
 
-  reader.onload = (e) => {
-    try {
-      const content = e.target?.result as string;
+  if (!supported) {
+    showParseFailure(FORMAT_UNSUPPORTED_MSG);
+    return;
+  }
 
-      const lines = content.split('\n').filter(line => line.trim());
+  try {
+    const workbook = await readWorkbookFromFile(file);
+    const rows = rowsFromWorkbook(workbook);
+    const parsed = parseRowsFromMatrix(rows);
 
-      if (lines.length < 2) {
-        showParseFailure('文件格式错误，至少需要包含表头和一行数据');
-        return;
-      }
-
-      const headers = lines[0].split(',').map(h => h.trim().replace(/^\uFEFF/, ''));
-
-      const codeIndex = headers.findIndex(h => h.includes('代码') || h.toLowerCase() === 'code');
-      const nameIndex = headers.findIndex(h => h.includes('名称') || h.toLowerCase() === 'name');
-      const typeIndex = headers.findIndex(h => h.includes('类型') || h.toLowerCase() === 'type');
-      const quantityIndex = headers.findIndex(h => h.includes('数量') || h.toLowerCase() === 'quantity');
-      const costPriceIndex = headers.findIndex(h => h.includes('成本价') || h.includes('成本') || h.toLowerCase() === 'cost');
-
-      if (codeIndex === -1 || nameIndex === -1) {
-        showParseFailure('文件格式错误，缺少必要的列（代码、名称）');
-        return;
-      }
-
-      const assets: any[] = [];
-      for (let i = 1; i < lines.length; i++) {
-        const rowNum = i + 1;
-        const cells = lines[i].split(',').map(c => c.trim());
-        if (cells.length < 2 || !cells[codeIndex]) continue;
-
-        const quantityStr = quantityIndex >= 0 ? cells[quantityIndex] : '';
-        const costStr = costPriceIndex >= 0 ? cells[costPriceIndex] : '';
-
-        if (quantityStr && Number.isNaN(Number(quantityStr))) {
-          showParseFailure(`第 ${rowNum} 行数据格式错误`);
-          return;
-        }
-        if (costStr && Number.isNaN(Number(costStr))) {
-          showParseFailure(`第 ${rowNum} 行数据格式错误`);
-          return;
-        }
-
-        const typeMap: Record<string, string> = {
-          '股票': 'stock',
-          '基金': 'fund',
-          '债券': 'bond',
-          'ETF': 'fund',
-          '其他': 'other',
-        };
-
-        assets.push({
-          code: cells[codeIndex],
-          name: cells[nameIndex] || '',
-          type: typeMap[cells[typeIndex]] || 'stock',
-          quantity: quantityStr ? parseFloat(quantityStr) : 0,
-          costPrice: costStr ? parseFloat(costStr) : 0,
-        });
-      }
-
-      parsedAssets.value = assets;
-
-      if (assets.length === 0) {
-        showParseFailure('未能解析出有效数据');
-      } else {
-        manualAssets.value = assets.map(a => ({
-          code: a.code,
-          name: a.name,
-          type: a.type,
-          quantity: a.quantity,
-          costPrice: a.costPrice,
-        }));
-        showParseSuccess(assets.length);
-      }
-    } catch (error) {
-      showParseFailure('解析文件失败: ' + (error as Error).message);
+    if ('error' in parsed) {
+      showParseFailure(parsed.error);
+      return;
     }
-  };
 
-  reader.onerror = () => {
-    showParseFailure('读取文件失败');
-  };
-
-  reader.readAsText(file);
+    applyParsedAssets(parsed);
+  } catch {
+    showParseFailure(FORMAT_UNSUPPORTED_MSG);
+  }
 };
 </script>
 

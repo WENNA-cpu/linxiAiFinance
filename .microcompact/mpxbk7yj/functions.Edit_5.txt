@@ -1,0 +1,53 @@
+The file /home/project/src/views/PortfolioDiagnosis.vue has been updated. Made 1 replacement.
+
+Here's the result of running `cat -n` on a snippet of the edited file:
+ 434→              </div>
+ 435→            </div>
+ 436→          </div>
+ 437→
+ 438→          <!-- 资产明细分析 - 只在有数据时显示 -->
+ 439→          <div v-if="assetAnalysis.length > 0" class="bg-white rounded-xl border border-slate-200 p-6">
+ 440→            <div class="flex items-center justify-between mb-4">
+ 441→              <h2 class="text-lg font-semibold text-slate-900">资产明细分析</h2>
+ 442→              <span class="text-xs text-slate-400">今日涨跌幅</span>
+ 443→            </div>
+ 444→            <div class="space-y-3">
+ 445→              <div
+ 446→                v-for="asset in assetAnalysis"
+ 447→                :key="asset.code"
+ 448→                class="flex items-center justify-between p-4 bg-slate-50 rounded-lg"
+ 449→              >
+ 450→                <div class="flex items-center gap-3">
+ 451→                  <div
+ 452→                    class="w-10 h-10 rounded-lg flex items-center justify-center"
+ 453→                    :class="asset.returnRate >= 0 ? 'bg-red-100' : 'bg-green-100'"
+ 454→                  >
+ 455→                    <component
+ 456→                      :is="asset.returnRate >= 0 ? TrendingUpIcon : TrendingDownIcon"
+ 457→                      class="w-5 h-5"
+ 458→                      :class="asset.returnRate >= 0 ? 'text-red-600' : 'text-green-600'"
+ 459→                    />
+ 460→                  </div>
+ 461→                  <div>
+ 462→                    <p class="font-medium text-slate-900">{{ asset.name }}</p>
+ 463→                    <p class="text-sm text-slate-500">{{ asset.code }} · {{ asset.type === 'stock' ? '股票' : asset.type === 'fund' ? '基金' : '其他' }}</p>
+ 464→                  </div>
+ 465→                </div>
+ 466→                <div class="text-right">
+ 467→                  <p class="font-medium" :class="asset.returnRate >= 0 ? 'text-red-600' : 'text-green-600'">
+ 468→                    {{ asset.returnRate >= 0 ? '+' : '' }}{{ asset.returnRate.toFixed(2) }}%
+ 469→                  </p>
+ 470→                  <p class="text-xs text-slate-400">{{ asset.dataSource }}</p>
+ 471→                </div>
+ 472→              </div>
+ 473→            </div>
+ 474→          </div>
+ 475→
+ 476→          <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+ 477→            <div class="bg-white rounded-xl border border-slate-200 p-6">
+ 478→              <div class="flex items-center gap-2 mb-4">
+ 479→                <AlertTriangleIcon class="w-5 h-5 text-red-500" />
+
+<system-reminder>
+如果遇到项目问题， 去检查webpack.config.js文件，重点检查文件里兜底策略的exclude: .(js|jsx|ts|tsx|css|json|html)$/i中 是否忘记添加mjs类型。
+</system-reminder>

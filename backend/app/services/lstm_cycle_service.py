@@ -57,7 +57,15 @@ class LSTMCyclePredictor:
             return {"error": "LSTM 模型未训练或加载失败", "available": False}
 
         if self.n_features > 1 and history:
-            return self._predict_multifeature(history)
+            multi = self._predict_multifeature(history)
+            if multi.get("available"):
+                return multi
+            if close_prices:
+                legacy = self._predict_legacy(close_prices)
+                if legacy.get("available"):
+                    legacy["feature_mode"] = "close_only_fallback"
+                    return legacy
+            return multi
         if close_prices:
             return self._predict_legacy(close_prices)
         if history:
@@ -138,14 +146,23 @@ _lstm_new: Optional[LSTMCyclePredictor] = None
 _lstm_legacy: Optional[LSTMCyclePredictor] = None
 
 
+def _legacy_model_available() -> bool:
+    legacy_path = BACKEND_DIR / LSTM_LEGACY_MODEL
+    scaler_path = BACKEND_DIR / LSTM_LEGACY_MODEL.replace(".h5", "_scaler.json")
+    return legacy_path.exists() and scaler_path.exists()
+
+
 def get_lstm_predictor(use_new: bool = True) -> LSTMCyclePredictor:
     global _lstm_new, _lstm_legacy
-    if use_new:
+    if use_new or not _legacy_model_available():
         if _lstm_new is None:
             _lstm_new = LSTMCyclePredictor()
         return _lstm_new
     if _lstm_legacy is None:
-        _lstm_legacy = LSTMCyclePredictor(model_path=LSTM_LEGACY_MODEL, scaler_path=LSTM_LEGACY_MODEL.replace(".h5", "_scaler.json"))
+        _lstm_legacy = LSTMCyclePredictor(
+            model_path=LSTM_LEGACY_MODEL,
+            scaler_path=LSTM_LEGACY_MODEL.replace(".h5", "_scaler.json"),
+        )
     return _lstm_legacy
 
 

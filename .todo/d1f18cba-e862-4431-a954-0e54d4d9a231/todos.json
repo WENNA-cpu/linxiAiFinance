@@ -1,0 +1,26 @@
+[
+  {
+    "id": "1",
+    "content": "创建 user_portfolios 数据库表",
+    "status": "completed",
+    "priority": "high"
+  },
+  {
+    "id": "2",
+    "content": "修改 PortfolioImport.vue 保存持仓到数据库",
+    "status": "completed",
+    "priority": "high"
+  },
+  {
+    "id": "3",
+    "content": "修改 PortfolioDiagnosis.vue 添加反馈埋点",
+    "status": "completed",
+    "priority": "high"
+  },
+  {
+    "id": "4",
+    "content": "验证所有修改",
+    "status": "completed",
+    "priority": "medium"
+  }
+]

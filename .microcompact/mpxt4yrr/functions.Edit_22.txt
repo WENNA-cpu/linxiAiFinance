@@ -1,0 +1,43 @@
+The file /home/project/backend/app/services/data_service.py has been updated. Made 1 replacement.
+
+Here's the result of running `cat -n` on a snippet of the edited file:
+  65→            items = data.get("items", [])
+  66→            return [dict(zip(fields, item)) for item in items]
+  67→        return None
+  68→
+  69→    async def fetch_daily_basic(self, ts_code: str, trade_date: str = None) -> Optional[List[Dict]]:
+  70→        """获取每日指标（估值数据）"""
+  71→        params = {"ts_code": ts_code}
+  72→        if trade_date:
+  73→            params["trade_date"] = trade_date
+  74→
+  75→        data = await self._request("daily_basic", params)
+  76→
+  77→        if data and "items" in data:
+  78→            fields = data.get("fields", [])
+  79→            items = data.get("items", [])
+  80→            return [dict(zip(fields, item)) for item in items]
+  81→        return None
+  82→
+  83→    async def fetch_daily_basic_historical(self, ts_code: str, start_date: str, end_date: str) -> Optional[List[Dict]]:
+  84→        """获取历史每日指标（估值数据）"""
+  85→        data = await self._request("daily_basic", {
+  86→            "ts_code": ts_code,
+  87→            "start_date": start_date,
+  88→            "end_date": end_date,
+  89→        })
+  90→
+  91→        if data and "items" in data:
+  92→            fields = data.get("fields", [])
+  93→            items = data.get("items", [])
+  94→            return [dict(zip(fields, item)) for item in items]
+  95→        return None
+  96→
+  97→    async def fetch_index_daily(self, ts_code: str = "000001.SH") -> Optional[List[Dict]]:
+  98→        """获取指数日线数据"""
+  99→        end_date = datetime.now().strftime("%Y%m%d")
+ 100→        start_date = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
+
+<system-reminder>
+如果遇到项目问题， 去检查webpack.config.js文件，重点检查文件里兜底策略的exclude: .(js|jsx|ts|tsx|css|json|html)$/i中 是否忘记添加mjs类型。
+</system-reminder>

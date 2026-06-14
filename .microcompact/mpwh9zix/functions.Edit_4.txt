@@ -1,0 +1,39 @@
+The file /home/project/backend/app/api/market.py has been updated. Made 1 replacement.
+
+Here's the result of running `cat -n` on a snippet of the edited file:
+   1→from fastapi import APIRouter, Depends, HTTPException
+   2→from sqlalchemy.orm import Session
+   3→from typing import Optional
+   4→from datetime import datetime
+   5→import random
+   6→
+   7→from app.models.database import get_db
+   8→from app.services.data_service import DataService
+   9→
+  10→router = APIRouter()
+  11→
+  12→
+  13→@router.get("/sentiment")
+  14→async def get_market_sentiment(db: Session = Depends(get_db)):
+  15→    """获取市场情绪简报"""
+  16→    data_service = DataService()
+  17→    sentiment = await data_service.fetch_sentiment_data()
+  18→
+  19→    # 转换为前端期望的数据格式
+  20→    return {
+  21→        "sentiment_index": sentiment.get("index", 45.5),
+  22→        "status": sentiment.get("status", "中性"),
+  23→        "market_state": "震荡整理" if abs(sentiment.get("index", 45.5) - 50) < 15 else ("强势上涨" if sentiment.get("index", 45.5) > 65 else "弱势下跌"),
+  24→        "warning_signals": random.randint(0, 3),
+  25→        "data_source": "Tushare 舆情数据",
+  26→        "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+  27→    }
+  28→
+  29→
+  30→@router.get("/data/{ts_code}")
+  31→async def get_market_data(ts_code: str, db: Session = Depends(get_db)):
+  32→    """获取股票行情数据"""
+
+<system-reminder>
+如果遇到项目问题， 去检查webpack.config.js文件，重点检查文件里兜底策略的exclude: .(js|jsx|ts|tsx|css|json|html)$/i中 是否忘记添加mjs类型。
+</system-reminder>

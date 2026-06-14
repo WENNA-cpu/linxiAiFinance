@@ -11,7 +11,9 @@ from app.services.data_service import DataService
 from app.services.lstm_cycle_service import get_lstm_predictor
 from app.api.portfolio import fetch_asset_history
 from app.services.model_manager import should_use_new_model
-from app.config import NEW_MODEL_RATIO
+from pathlib import Path
+
+from app.config import NEW_MODEL_RATIO, LSTM_CYCLE_MODEL
 
 router = APIRouter()
 
@@ -89,9 +91,29 @@ async def run_lstm_forecast(ts_code: str, use_new: bool) -> Dict[str, Any]:
     closes = [float(r["close"]) for r in history if r.get("close")]
     if len(closes) < 30:
         return {"available": False, "reason": "收盘价历史不足"}
+
+    data_service = DataService()
+    latest = await data_service.get_current_price(ts_code)
+    if latest and latest.get("close"):
+        latest_close = float(latest["close"])
+        latest_td = str(latest.get("trade_date", ""))
+        if history:
+            last_td = str(history[-1].get("trade_date", ""))
+            if latest_td >= last_td:
+                if latest_td == last_td:
+                    closes[-1] = latest_close
+                    history[-1]["close"] = latest_close
+                else:
+                    closes.append(latest_close)
+                    history = [*history, dict(latest)]
+        print(
+            f"[周期分析] {ts_code} LSTM 当前价={latest_close} trade_date={latest_td}"
+        )
+
     predictor = get_lstm_predictor(use_new=use_new)
     result = predictor.predict(close_prices=closes, history=history)
-    result["model_variant"] = "new" if use_new else "legacy"
+    is_new_model = predictor.model_path.name == Path(LSTM_CYCLE_MODEL).name
+    result["model_variant"] = "new" if is_new_model else "legacy"
     return result
 
 
@@ -116,6 +138,93 @@ def format_trade_date(trade_date: str) -> str:
     if trade_date and len(trade_date) == 8:
         return f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
     return trade_date
+
+
+def calculate_historical_percentile(current: float, values: List[float]) -> int:
+    if not values:
+        return 50
+    below = sum(1 for v in values if v <= current)
+    return int(round(below / len(values) * 100))
+
+
+def generate_forecast_dates(last_date_str: str, n: int = 5) -> List[str]:
+    if not last_date_str:
+        return []
+    try:
+        last = datetime.strptime(last_date_str, "%Y-%m-%d")
+    except ValueError:
+        return []
+    dates: List[str] = []
+    cursor = last
+    while len(dates) < n:
+        cursor += timedelta(days=1)
+        if cursor.weekday() < 5:
+            dates.append(cursor.strftime("%Y-%m-%d"))
+    return dates
+
+
+def compute_model_confidence(
+    sample_size: int,
+    lstm_result: Dict[str, Any],
+    use_price_fallback: bool,
+) -> float:
+    confidence = min(88.0, 52.0 + sample_size / 25.0)
+    if lstm_result.get("available"):
+        confidence += 8.0
+    else:
+        confidence -= 10.0
+    if use_price_fallback:
+        confidence -= 12.0
+    return round(max(40.0, min(95.0, confidence)), 1)
+
+
+def build_pe_lstm_forecast(
+    pe_history: List[Dict[str, Any]],
+    lstm_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    empty = {
+        "pe_forecast": [],
+        "pe_forecast_lower": [],
+        "pe_forecast_upper": [],
+        "forecast_available": False,
+    }
+    if not pe_history or not lstm_result.get("available"):
+        return empty
+
+    current_pe = float(pe_history[-1]["value"])
+    last_date = pe_history[-1]["date"]
+    predicted_prices = lstm_result.get("predicted_prices") or []
+    if not predicted_prices:
+        return empty
+
+    current_price = float(lstm_result.get("current_price") or 0)
+    pe_values = [float(item["value"]) for item in pe_history]
+    pe_volatility = float(np.std(pe_values[-30:])) if len(pe_values) >= 30 else max(current_pe * 0.05, 0.1)
+
+    forecast_dates = generate_forecast_dates(last_date, len(predicted_prices))
+    pe_forecast: List[Dict[str, Any]] = []
+    pe_forecast_lower: List[Dict[str, Any]] = []
+    pe_forecast_upper: List[Dict[str, Any]] = []
+
+    for idx, pred_price in enumerate(predicted_prices[:5]):
+        date = forecast_dates[idx] if idx < len(forecast_dates) else f"T+{idx + 1}"
+        if current_price > 0:
+            pe_pred = current_pe * (float(pred_price) / current_price)
+        else:
+            pe_pred = current_pe
+
+        spread = 1.96 * pe_volatility * (1 + idx * 0.08)
+        pe_forecast.append({"date": date, "value": round(pe_pred, 2)})
+        pe_forecast_lower.append({"date": date, "value": round(max(pe_pred - spread, 0.01), 2)})
+        pe_forecast_upper.append({"date": date, "value": round(pe_pred + spread, 2)})
+
+    return {
+        "pe_forecast": pe_forecast,
+        "pe_forecast_lower": pe_forecast_lower,
+        "pe_forecast_upper": pe_forecast_upper,
+        "forecast_available": True,
+        "forecast_horizon_days": len(pe_forecast),
+    }
 
 
 async def analyze_pe_pb(
@@ -227,6 +336,11 @@ async def analyze_pe_pb(
 
     use_new = should_use_new_model(ts_code, NEW_MODEL_RATIO)
     lstm_result = await run_lstm_forecast(ts_code, use_new=use_new)
+    pe_forecast_payload = build_pe_lstm_forecast(pe_history, lstm_result)
+    pe_percentile = calculate_historical_percentile(current_pe, pe_values)
+    pb_percentile = calculate_historical_percentile(current_pb, pb_values) if pb_values else 50
+    confidence = compute_model_confidence(len(pe_values), lstm_result, use_price_fallback)
+    model_version = lstm_result.get("model_variant", "legacy") if lstm_result.get("available") else "percentile_only"
 
     history_limit = min(len(pe_history), 500)
     response = {
@@ -234,19 +348,29 @@ async def analyze_pe_pb(
         "name": stock_name,
         "current_pe": round(current_pe, 2),
         "current_pb": round(current_pb, 2),
+        "pe_percentile": pe_percentile,
+        "pb_percentile": pb_percentile,
         "pe_30_percentile": round(pe_30, 2),
         "pe_70_percentile": round(pe_70, 2),
         "pb_30_percentile": round(pb_30, 2),
         "pb_70_percentile": round(pb_70, 2),
         "interval": interval,
         "suggestion": suggestion,
+        "confidence": confidence,
         "pe_history": pe_history[-history_limit:],
         "pb_history": pb_history[-history_limit:],
+        "pe_forecast": pe_forecast_payload["pe_forecast"],
+        "pe_forecast_lower": pe_forecast_payload["pe_forecast_lower"],
+        "pe_forecast_upper": pe_forecast_payload["pe_forecast_upper"],
+        "predicted_pe": [item["value"] for item in pe_forecast_payload["pe_forecast"]],
+        "forecast_available": pe_forecast_payload["forecast_available"],
+        "forecast_horizon_days": pe_forecast_payload.get("forecast_horizon_days", 0),
         "time_range": time_range,
         "lookback_days": days,
         "data_source": data_source_label,
         "use_price_fallback": use_price_fallback,
         "lstm_forecast": lstm_result,
+        "model_version": model_version,
         "model_routing": {
             "use_new_model": use_new,
             "gray_ratio": NEW_MODEL_RATIO,

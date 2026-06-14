@@ -54,8 +54,31 @@ interface TraceData {
   error_detail?: string;
 }
 
+interface FeedbackItem {
+  feedback_type: string;
+  reason: string | null;
+  created_at: string | null;
+}
+
 const traceData = ref<TraceData | null>(null);
 const isLineageLoading = ref(true);
+const activeDetailTab = ref('audit');
+const feedbacks = ref<FeedbackItem[]>([]);
+const feedbackLoading = ref(false);
+const feedbackError = ref('');
+
+const resolveRequestIdFromRoute = (): string => {
+  const fromParam = route.params.requestId as string | undefined;
+  const fromQuery = route.query.request_id as string | undefined;
+  let id = (fromParam || fromQuery || '').trim();
+
+  if (!id || id === 'latest') {
+    id = (localStorage.getItem('last_diagnosis_id') || '').trim();
+  }
+
+  requestId.value = id;
+  return id;
+};
 
 // 格式化时间
 const formatTime = (isoString: string) => {
@@ -207,26 +230,74 @@ const auditLogs = computed(() => {
   }));
 });
 
+const feedbackTypeLabel = (feedbackType: string) => {
+  const normalized = feedbackType.trim().toLowerCase();
+  if (normalized === 'helpful' || normalized === 'positive') return '有帮助';
+  if (normalized === 'unhelpful' || normalized === 'negative') return '需改进';
+  return feedbackType;
+};
+
+const feedbackTypeClass = (feedbackType: string) => {
+  const normalized = feedbackType.trim().toLowerCase();
+  if (normalized === 'helpful' || normalized === 'positive') {
+    return 'bg-emerald-100 text-emerald-700';
+  }
+  if (normalized === 'unhelpful' || normalized === 'negative') {
+    return 'bg-red-100 text-red-700';
+  }
+  return 'bg-slate-100 text-slate-700';
+};
+
+const isHelpfulFeedback = (feedbackType: string) => {
+  const normalized = feedbackType.trim().toLowerCase();
+  return normalized === 'helpful' || normalized === 'positive';
+};
+
+const feedbackCardClass = (feedbackType: string) =>
+  isHelpfulFeedback(feedbackType)
+    ? 'border-l-4 border-l-emerald-500 bg-emerald-50/40'
+    : 'border-l-4 border-l-red-500 bg-red-50/40';
+
+const fetchFeedbacks = async (targetId?: string) => {
+  const rid = (targetId ?? requestId.value)?.trim();
+  if (!rid || rid === 'latest') return;
+
+  feedbackLoading.value = true;
+  feedbackError.value = '';
+
+  try {
+    const response = await fetch(`/api/feedback/by-request/${encodeURIComponent(rid)}`);
+    if (!response.ok) {
+      const errBody = await response.json().catch(() => ({}));
+      throw new Error(errBody.detail || `获取用户反馈失败 (${response.status})`);
+    }
+    const data = await response.json();
+    feedbacks.value = Array.isArray(data.feedbacks) ? data.feedbacks : [];
+  } catch (err) {
+    feedbackError.value = err instanceof Error ? err.message : '获取用户反馈失败';
+  } finally {
+    feedbackLoading.value = false;
+  }
+};
+
 // 获取溯源与血缘数据
-const fetchTraceData = async () => {
+const fetchTraceData = async (targetId?: string) => {
   isLoading.value = true;
   error.value = '';
   isLineageLoading.value = true;
 
-  if (!requestId.value || requestId.value === 'latest') {
-    const lastId = localStorage.getItem('last_diagnosis_id');
-    if (lastId) {
-      requestId.value = lastId;
-    } else {
-      error.value = '未找到历史诊断记录，请先完成一次持仓诊断';
-      isLoading.value = false;
-      isLineageLoading.value = false;
-      return;
-    }
+  const rid = (targetId ?? requestId.value)?.trim();
+  if (!rid) {
+    error.value = '未找到历史诊断记录，请先完成一次持仓诊断';
+    isLoading.value = false;
+    isLineageLoading.value = false;
+    return;
   }
 
+  requestId.value = rid;
+
   try {
-    const response = await fetch(`/api/trace/${requestId.value}`);
+    const response = await fetch(`/api/trace/${encodeURIComponent(rid)}`);
     if (!response.ok) {
       const errBody = await response.json().catch(() => ({}));
       throw new Error(errBody.detail || `获取溯源信息失败 (${response.status})`);
@@ -242,17 +313,27 @@ const fetchTraceData = async () => {
   }
 };
 
+const loadPageData = async () => {
+  const rid = resolveRequestIdFromRoute();
+  if (!rid) {
+    error.value = '未找到历史诊断记录，请先完成一次持仓诊断';
+    isLoading.value = false;
+    isLineageLoading.value = false;
+    return;
+  }
+
+  await Promise.all([fetchTraceData(rid), fetchFeedbacks(rid)]);
+};
+
 onMounted(() => {
-  fetchTraceData();
+  loadPageData();
 });
 
 watch(
-  () => route.params.requestId,
-  (newId) => {
-    if (newId && newId !== requestId.value) {
-      requestId.value = newId as string;
-      fetchTraceData();
-    }
+  () => `${String(route.params.requestId ?? '')}|${String(route.query.request_id ?? '')}`,
+  (signature, prevSignature) => {
+    if (signature === prevSignature) return;
+    loadPageData();
   },
 );
 
@@ -352,46 +433,141 @@ watch(
           </div>
         </div>
 
-        <!-- 7 步全流程时间线（数据库真实日志） -->
+        <!-- 审计日志 / 用户反馈 -->
         <div class="bg-white rounded-xl border border-slate-200 p-6 mb-8">
-          <div class="flex items-center gap-2 mb-6">
+          <div class="flex items-center gap-2 mb-4">
             <LayersIcon class="w-5 h-5 text-indigo-600" />
-            <h2 class="text-lg font-semibold text-slate-900">诊断全流程审计日志</h2>
-            <span class="text-xs text-slate-400">数据来源：SQLite audit_logs 表</span>
+            <h2 class="text-lg font-semibold text-slate-900">诊断记录详情</h2>
           </div>
-          <div v-if="processingTimeline.length === 0" class="text-sm text-slate-500 py-4">
-            暂无审计日志
-          </div>
-          <div v-else class="relative">
-            <!-- 贯穿所有步骤的竖线 -->
-            <div
-              v-if="processingTimeline.length > 1"
-              class="absolute left-4 w-0.5 bg-slate-200 -translate-x-1/2 pointer-events-none"
-              style="top: 16px; bottom: 16px"
-            />
-            <div
-              v-for="log in processingTimeline"
-              :key="log.step"
-              class="flex gap-4 pb-5 last:pb-0"
-            >
-              <div
-                class="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white flex-shrink-0 relative z-10"
-                :class="log.status === '成功' ? 'bg-emerald-500' : log.status === '失败' ? 'bg-red-500' : 'bg-amber-500'"
+
+          <div class="border-b border-slate-200 mb-5">
+            <nav class="flex gap-1">
+              <button
+                type="button"
+                class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px"
+                :class="activeDetailTab === 'audit'
+                  ? 'border-indigo-600 text-indigo-700'
+                  : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'"
+                @click="activeDetailTab = 'audit'"
               >
-                {{ log.step }}
+                审计日志
+              </button>
+              <button
+                type="button"
+                class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px flex items-center gap-1.5"
+                :class="activeDetailTab === 'feedback'
+                  ? 'border-indigo-600 text-indigo-700'
+                  : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'"
+                @click="activeDetailTab = 'feedback'"
+              >
+                用户反馈
+                <span
+                  v-if="feedbacks.length > 0"
+                  class="text-xs px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700"
+                >
+                  {{ feedbacks.length }}
+                </span>
+              </button>
+            </nav>
+          </div>
+
+          <div v-show="activeDetailTab === 'audit'">
+              <div class="flex items-center gap-2 mb-4">
+                <span class="text-sm font-medium text-slate-700">诊断全流程审计日志</span>
+                <span class="text-xs text-slate-400">数据来源：SQLite audit_logs 表</span>
               </div>
-              <div class="flex-1 min-w-0 pt-0.5">
-                <div class="flex flex-wrap items-center gap-2 mb-1">
-                  <span class="font-medium text-slate-900">{{ log.action }}</span>
-                  <span class="text-xs px-2 py-0.5 rounded-full" :class="statusBadgeClass(log.status)">
-                    {{ statusLabel(log.status) }}
-                  </span>
-                  <span class="text-xs text-slate-400">{{ log.time }}</span>
-                  <span v-if="log.duration !== '-'" class="text-xs text-slate-400">耗时 {{ log.duration }}</span>
+              <div v-if="processingTimeline.length === 0" class="text-sm text-slate-500 py-4">
+                暂无审计日志
+              </div>
+              <div v-else class="relative">
+                <div
+                  v-if="processingTimeline.length > 1"
+                  class="absolute left-4 w-0.5 bg-slate-200 -translate-x-1/2 pointer-events-none"
+                  style="top: 16px; bottom: 16px"
+                />
+                <div
+                  v-for="log in processingTimeline"
+                  :key="log.step"
+                  class="flex gap-4 pb-5 last:pb-0"
+                >
+                  <div
+                    class="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white flex-shrink-0 relative z-10"
+                    :class="log.status === '成功' ? 'bg-emerald-500' : log.status === '失败' ? 'bg-red-500' : 'bg-amber-500'"
+                  >
+                    {{ log.step }}
+                  </div>
+                  <div class="flex-1 min-w-0 pt-0.5">
+                    <div class="flex flex-wrap items-center gap-2 mb-1">
+                      <span class="font-medium text-slate-900">{{ log.action }}</span>
+                      <span class="text-xs px-2 py-0.5 rounded-full" :class="statusBadgeClass(log.status)">
+                        {{ statusLabel(log.status) }}
+                      </span>
+                      <span class="text-xs text-slate-400">{{ log.time }}</span>
+                      <span v-if="log.duration !== '-'" class="text-xs text-slate-400">耗时 {{ log.duration }}</span>
+                    </div>
+                    <p class="text-sm text-slate-600">{{ log.detail }}</p>
+                  </div>
                 </div>
-                <p class="text-sm text-slate-600">{{ log.detail }}</p>
               </div>
-            </div>
+          </div>
+
+          <div v-show="activeDetailTab === 'feedback'">
+              <div
+                v-if="feedbackError"
+                class="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-700 flex items-start gap-2"
+              >
+                <AlertTriangleIcon class="w-4 h-4 flex-shrink-0 mt-0.5" />
+                <span>{{ feedbackError }}</span>
+              </div>
+              <div
+                v-if="feedbackLoading && feedbacks.length === 0"
+                class="flex items-center justify-center py-10 text-sm text-slate-500"
+              >
+                <div class="animate-spin rounded-full h-5 w-5 border-b-2 border-indigo-600 mr-2"></div>
+                加载用户反馈...
+              </div>
+              <div
+                v-else-if="feedbacks.length === 0"
+                class="text-sm text-slate-500 py-10 text-center"
+              >
+                暂无用户反馈
+              </div>
+              <div v-else class="space-y-3 mt-2">
+                <div
+                  v-if="feedbackLoading"
+                  class="text-xs text-slate-400 flex items-center gap-2"
+                >
+                  <div class="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-indigo-600"></div>
+                  正在刷新反馈数据...
+                </div>
+                <div
+                  v-for="(item, index) in feedbacks"
+                  :key="`${item.created_at}-${index}`"
+                  class="p-4 rounded-lg border border-slate-200"
+                  :class="feedbackCardClass(item.feedback_type)"
+                >
+                  <div class="flex flex-wrap items-center gap-2 mb-2">
+                    <span
+                      class="text-xs px-2.5 py-1 rounded-full font-semibold"
+                      :class="feedbackTypeClass(item.feedback_type)"
+                    >
+                      {{ feedbackTypeLabel(item.feedback_type) }}
+                    </span>
+                    <span class="text-xs text-slate-400">
+                      {{ item.created_at ? formatDateTime(item.created_at) : '-' }}
+                    </span>
+                  </div>
+                  <p v-if="!isHelpfulFeedback(item.feedback_type) && item.reason" class="text-sm text-slate-700">
+                    <span class="text-slate-500">反馈原因：</span>{{ item.reason }}
+                  </p>
+                  <p
+                    v-else-if="!isHelpfulFeedback(item.feedback_type)"
+                    class="text-sm text-slate-400"
+                  >
+                    未填写反馈原因
+                  </p>
+                </div>
+              </div>
           </div>
         </div>
 

@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+from pydantic import BaseModel
 import random
 import time
 
@@ -12,8 +13,21 @@ router = APIRouter()
 
 # 情绪指标短时间内变化小，缓存 8 分钟以减少 Tushare 调用
 SENTIMENT_CACHE_TTL = 480
+STOCK_META_CACHE_TTL = 600
 _sentiment_metrics_cache: Optional[Dict[str, Any]] = None
 _sentiment_metrics_cached_at: float = 0.0
+_stock_industry_cache: Optional[Dict[str, str]] = None
+_stock_industry_cached_at: float = 0.0
+
+
+class EmotionPortfolioAsset(BaseModel):
+    code: str
+    name: str = ""
+    type: str = "stock"
+
+
+class EmotionPortfolioInput(BaseModel):
+    assets: List[EmotionPortfolioAsset] = []
 
 DATA_SOURCE_LABEL = (
     "数据基于Tushare全市场换手率、涨跌比等公开数据加权计算，仅作参考。"
@@ -112,6 +126,83 @@ async def fetch_stk_shock(data_service: DataService, trade_date: str) -> List[Di
     except Exception as e:
         print(f"Error fetching stk_shock: {e}")
     return []
+
+
+def _normalize_ts_code(code: str) -> str:
+    trimmed = code.strip().upper()
+    if "." in trimmed:
+        return trimmed
+    if trimmed.startswith(("6", "5")):
+        return f"{trimmed}.SH"
+    return f"{trimmed}.SZ"
+
+
+def _bare_code(code: str) -> str:
+    return _normalize_ts_code(code).split(".")[0]
+
+
+async def _get_stock_industry_map(data_service: DataService) -> Dict[str, str]:
+    global _stock_industry_cache, _stock_industry_cached_at
+    now = time.time()
+    if _stock_industry_cache is not None and now - _stock_industry_cached_at < STOCK_META_CACHE_TTL:
+        return _stock_industry_cache
+
+    industry_map: Dict[str, str] = {}
+    stock_basic = await data_service.fetch_stock_basic()
+    if stock_basic:
+        for row in stock_basic:
+            ts_code = str(row.get("ts_code") or "")
+            industry = str(row.get("industry") or "").strip() or "综合"
+            if ts_code:
+                industry_map[ts_code] = industry
+                industry_map[_bare_code(ts_code)] = industry
+
+    _stock_industry_cache = industry_map
+    _stock_industry_cached_at = now
+    return industry_map
+
+
+def _resolve_asset_industry(asset: EmotionPortfolioAsset, industry_map: Dict[str, str]) -> str:
+    if asset.type == "fund":
+        return "基金"
+    if asset.type == "bond":
+        return "债券"
+    if asset.type == "other":
+        return "其他"
+
+    ts_code = _normalize_ts_code(asset.code)
+    bare = _bare_code(asset.code)
+    return industry_map.get(ts_code) or industry_map.get(bare) or "综合"
+
+
+@router.post("/emotion-portfolio-context")
+async def get_emotion_portfolio_context(
+    data: EmotionPortfolioInput,
+    db: Session = Depends(get_db),
+):
+    """为情绪纠偏页提供 Tushare 行业分类"""
+    try:
+        data_service = DataService()
+        industry_map = await _get_stock_industry_map(data_service)
+
+        asset_industries = [
+            {
+                "code": asset.code,
+                "name": asset.name,
+                "type": asset.type,
+                "industry": _resolve_asset_industry(asset, industry_map),
+            }
+            for asset in data.assets
+        ]
+
+        return {
+            "asset_industries": asset_industries,
+            "data_source": "Tushare stock_basic 行业分类",
+            "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    except Exception as e:
+        print(f"Error in get_emotion_portfolio_context: {e}")
+        raise HTTPException(status_code=503, detail="无法获取持仓行业与热点数据，请稍后重试")
 
 
 def _get_cached_sentiment_metrics() -> Optional[Dict[str, Any]]:

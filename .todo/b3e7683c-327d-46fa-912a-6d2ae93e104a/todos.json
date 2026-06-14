@@ -1,0 +1,32 @@
+[
+  {
+    "id": "1",
+    "content": "后端：创建 audit_log 表",
+    "status": "completed",
+    "priority": "high"
+  },
+  {
+    "id": "2",
+    "content": "后端：在 /diagnose 接口中记录审计日志",
+    "status": "completed",
+    "priority": "high"
+  },
+  {
+    "id": "3",
+    "content": "后端：创建 GET /api/trace/{request_id} 接口",
+    "status": "completed",
+    "priority": "high"
+  },
+  {
+    "id": "4",
+    "content": "前端：修改 Traceability.vue 调用真实接口",
+    "status": "completed",
+    "priority": "high"
+  },
+  {
+    "id": "5",
+    "content": "验证修复结果",
+    "status": "completed",
+    "priority": "high"
+  }
+]

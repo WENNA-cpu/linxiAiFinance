@@ -13,6 +13,7 @@ import BrainIcon from '@/components/icons/BrainIcon.vue';
 import HeartIcon from '@/components/icons/HeartIcon.vue';
 import ShieldIcon from '@/components/icons/ShieldIcon.vue';
 import CalculatorIcon from '@/components/icons/CalculatorIcon.vue';
+import RefreshIcon from '@/components/icons/RefreshIcon.vue';
 
 const router = useRouter();
 const portfolioStore = usePortfolioStore();
@@ -21,25 +22,37 @@ const isSentimentLoading = ref(true);
 const sentimentError = ref('');
 
 const DATA_SOURCE_LABELS = {
-  bias: '*基于用户持仓行为的模拟分析*',
-  estimate: '*基于历史回测数据的模拟估算*',
+  bias: '*基于用户真实持仓与 Tushare 行业分类数据计算*',
+  estimate: '*基于持仓风险系数与盈亏状态的动态估算*',
   emotion: '*基于市场公开数据的实时计算*',
 };
 
 const DATA_SOURCE_MODAL_ITEMS = [
   { title: '情绪指数', desc: '基于 Tushare 换手率、涨跌比等数据计算' },
-  { title: '行为偏差', desc: '基于用户持仓数据的实时分析' },
-  { title: '矫正估算', desc: '基于持仓数量与波动率的动态估算' },
+  { title: '行为偏差', desc: '基于用户真实持仓的行业集中度、亏损数量与分散程度计算' },
+  { title: '矫正估算', desc: '基于持仓风险系数、持仓数量与当前盈亏百分比估算' },
 ];
 
 const showDataSourceModal = ref(false);
 const SENTIMENT_CACHE_KEY = 'emotion_sentiment_cache_v2';
 const SENTIMENT_CACHE_TTL_MS = 8 * 60 * 1000;
 
-const HOT_STOCK_CODES = new Set([
-  '600519', '000001', '601318', '600036', '000858', '601899',
-  '510050', '510300', '510500', '159915', '600900', '601166',
-]);
+interface PortfolioIndustryRow {
+  code: string;
+  name: string;
+  type: string;
+  industry: string;
+}
+
+interface PortfolioContext {
+  asset_industries: PortfolioIndustryRow[];
+}
+
+const portfolioContext = ref<PortfolioContext | null>(null);
+const isPortfolioContextLoading = ref(false);
+const isRefreshingQuotes = ref(false);
+const quoteRefreshMessage = ref('');
+const lastQuoteRefreshTime = ref('');
 
 interface SentimentData {
   sentiment_index: number;
@@ -67,35 +80,149 @@ const portfolioTotalValue = computed(() => {
   return portfolioAssets.value.reduce((sum, a) => sum + (a.marketValue || 0), 0);
 });
 
-const inferIndustry = (asset: Asset): string => {
+const portfolioTotalCost = computed(() => {
+  const total = portfolioStore.portfolio.totalCost;
+  if (total > 0) return total;
+  return portfolioAssets.value.reduce((sum, a) => sum + (a.costPrice || 0) * (a.quantity || 0), 0);
+});
+
+const normalizeTsCode = (code: string) => {
+  const trimmed = code.trim().toUpperCase();
+  if (trimmed.includes('.')) return trimmed;
+  if (trimmed.startsWith('6') || trimmed.startsWith('5')) return `${trimmed}.SH`;
+  return `${trimmed}.SZ`;
+};
+
+const bareCode = (code: string) => normalizeTsCode(code).replace(/\.(SH|SZ|BJ)$/i, '');
+
+type RawAsset = Asset & {
+  cost?: number;
+  cost_price?: number;
+  current_price?: number;
+};
+
+type AssetPnlStatus = 'profit' | 'loss' | 'missing' | 'breakeven';
+
+interface AssetPnlRow {
+  name: string;
+  code: string;
+  cost: number | null;
+  currentPrice: number | null;
+  status: AssetPnlStatus;
+  statusLabel: string;
+}
+
+const readAssetCost = (asset: RawAsset): number | null => {
+  const raw = asset as Record<string, unknown>;
+  const candidates = [asset.costPrice, asset.cost, asset.cost_price, raw.cost, raw.cost_price];
+  for (const value of candidates) {
+    const num = Number(value);
+    if (Number.isFinite(num) && num > 0) return num;
+  }
+  return null;
+};
+
+const readAssetCurrentPrice = (asset: RawAsset): number | null => {
+  const raw = asset as Record<string, unknown>;
+  const candidates = [asset.currentPrice, asset.current_price, raw.current_price];
+  for (const value of candidates) {
+    const num = Number(value);
+    if (Number.isFinite(num) && num > 0) return num;
+  }
+  return null;
+};
+
+const getAssetPnlRow = (asset: RawAsset): AssetPnlRow => {
+  const cost = readAssetCost(asset);
+  const currentPrice = readAssetCurrentPrice(asset);
+
+  if (cost == null || currentPrice == null) {
+    return {
+      name: asset.name,
+      code: asset.code,
+      cost,
+      currentPrice,
+      status: 'missing',
+      statusLabel: '数据缺失',
+    };
+  }
+  if (currentPrice < cost) {
+    return {
+      name: asset.name,
+      code: asset.code,
+      cost,
+      currentPrice,
+      status: 'loss',
+      statusLabel: '亏损',
+    };
+  }
+  if (currentPrice > cost) {
+    return {
+      name: asset.name,
+      code: asset.code,
+      cost,
+      currentPrice,
+      status: 'profit',
+      statusLabel: '盈利',
+    };
+  }
+  return {
+    name: asset.name,
+    code: asset.code,
+    cost,
+    currentPrice,
+    status: 'breakeven',
+    statusLabel: '持平',
+  };
+};
+
+const assetPnlRows = computed(() => portfolioAssets.value.map(getAssetPnlRow));
+
+const logAssetPnlDebug = (rows: AssetPnlRow[]) => {
+  if (!rows.length) return;
+  console.group('[情绪纠偏] 持仓盈亏判断');
+  console.table(
+    rows.map((row) => ({
+      名称: row.name,
+      代码: row.code,
+      cost: row.cost,
+      current_price: row.currentPrice,
+      状态: row.statusLabel,
+    })),
+  );
+  console.groupEnd();
+};
+
+watch(assetPnlRows, (rows) => {
+  logAssetPnlDebug(rows);
+}, { immediate: true, deep: true });
+
+const industryByCode = computed(() => {
+  const map = new Map<string, string>();
+  for (const row of portfolioContext.value?.asset_industries ?? []) {
+    map.set(normalizeTsCode(row.code), row.industry);
+    map.set(bareCode(row.code), row.industry);
+  }
+  return map;
+});
+
+const resolveAssetIndustry = (asset: Asset): string => {
+  const fromApi = industryByCode.value.get(normalizeTsCode(asset.code))
+    ?? industryByCode.value.get(bareCode(asset.code));
+  if (fromApi) return fromApi;
   if (asset.type === 'fund') return '基金';
   if (asset.type === 'bond') return '债券';
   if (asset.type === 'other') return '其他';
-
-  const name = asset.name;
-  const patterns: [RegExp, string][] = [
-    [/银行|金融|证券|保险|信托/, '金融'],
-    [/茅台|五粮|汾酒|泸州|古井|洋河|啤酒|餐饮|食品|乳业|消费/, '消费'],
-    [/科技|软件|芯片|半导体|电子|通信|计算机|网络|互联/, '科技'],
-    [/医药|制药|生物|医疗|健康/, '医药'],
-    [/地产|建筑|水泥|钢铁|煤炭|矿业|能源|石油|化工/, '周期'],
-    [/汽车|新能源|电池|光伏|风电|锂电/, '新能源'],
-    [/电力|水务|燃气|交通|机场|港口|高速/, '公用事业'],
-  ];
-  for (const [regex, industry] of patterns) {
-    if (regex.test(name)) return industry;
-  }
   return '综合';
 };
 
-const normalizeCode = (code: string) => code.replace(/\.\w+$/i, '');
-
-const isLargeCapOrHot = (asset: Asset): boolean => {
-  const code = normalizeCode(asset.code);
-  if (HOT_STOCK_CODES.has(code)) return true;
-  if (asset.type === 'fund' && /50|300|500|ETF|沪深/i.test(asset.name)) return true;
-  const total = portfolioTotalValue.value;
-  return total > 0 && asset.marketValue / total >= 0.15;
+const buildIndustryValueMap = () => {
+  const industryMap = new Map<string, number>();
+  for (const asset of portfolioAssets.value) {
+    const industry = resolveAssetIndustry(asset);
+    industryMap.set(industry, (industryMap.get(industry) || 0) + (asset.marketValue || 0));
+  }
+  return industryMap;
 };
 
 const mapSentimentToEmotion = (index: number): 'fear' | 'neutral' | 'greed' => {
@@ -125,11 +252,7 @@ const confirmationBias = computed(() => {
   const assets = portfolioAssets.value;
   if (!assets.length) return null;
 
-  const industryMap = new Map<string, number>();
-  for (const asset of assets) {
-    const industry = inferIndustry(asset);
-    industryMap.set(industry, (industryMap.get(industry) || 0) + (asset.marketValue || 0));
-  }
+  const industryMap = buildIndustryValueMap();
 
   let topIndustry = '综合';
   let topValue = 0;
@@ -145,20 +268,26 @@ const confirmationBias = computed(() => {
   return {
     industry: topIndustry,
     pct,
-    message: `您的持仓集中在${topIndustry}，占比 ${pct}%`,
+    message: `${topIndustry}占比 ${pct}%`,
     severity: pct >= 50,
   };
 });
 
 const lossAversion = computed(() => {
-  const assets = portfolioAssets.value;
-  if (!assets.length) return null;
+  const rows = assetPnlRows.value;
+  if (!rows.length) return null;
 
-  const lossCount = assets.filter((a) => a.currentPrice < a.costPrice).length;
+  const lossCount = rows.filter((row) => row.status === 'loss').length;
+  const missingCount = rows.filter((row) => row.status === 'missing').length;
+
   return {
     count: lossCount,
-    message: `您的持仓中有 ${lossCount} 只资产处于亏损状态`,
-    severity: lossCount >= Math.ceil(assets.length / 2),
+    missingCount,
+    rows,
+    message: missingCount > 0
+      ? `${lossCount} 只亏损，${missingCount} 只数据缺失`
+      : `${lossCount} 只亏损`,
+    severity: lossCount >= Math.ceil(rows.length / 2),
   };
 });
 
@@ -166,18 +295,39 @@ const herdMentality = computed(() => {
   const assets = portfolioAssets.value;
   if (!assets.length) return null;
 
-  const hotCount = assets.filter(isLargeCapOrHot).length;
-  const ratio = hotCount / assets.length;
-  if (ratio >= 0.5) {
+  const industryMap = buildIndustryValueMap();
+  const industryCount = industryMap.size;
+  const total = portfolioTotalValue.value;
+
+  let maxPct = 0;
+  let topIndustry = '';
+  if (total > 0) {
+    for (const [industry, value] of industryMap) {
+      const pct = Math.round((value / total) * 100);
+      if (pct > maxPct) {
+        maxPct = pct;
+        topIndustry = industry;
+      }
+    }
+  }
+
+  if (maxPct > 50) {
     return {
-      triggered: true,
-      message: '您的持仓与当前市场热点高度相关',
+      level: '较高',
+      message: `${topIndustry}行业占比 ${maxPct}%，跟风集中风险较高`,
       severity: true,
     };
   }
+  if (industryCount >= 3) {
+    return {
+      level: '较低',
+      message: `持仓分散在 ${industryCount} 个行业，羊群效应较低`,
+      severity: false,
+    };
+  }
   return {
-    triggered: false,
-    message: `您的持仓中 ${hotCount}/${assets.length} 只与主流热点相关，整体独立度较好`,
+    level: '适中',
+    message: `持仓覆盖 ${industryCount} 个行业，羊群效应适中`,
     severity: false,
   };
 });
@@ -187,66 +337,87 @@ const overconfidence = computed(() => {
   if (!assets.length) return null;
 
   const count = assets.length;
+  let level: '低' | '中' | '高' = '中';
+  if (count < 5) level = '低';
+  else if (count > 10) level = '高';
+
+  const levelText = level === '低'
+    ? '过度自信风险较低'
+    : level === '高'
+      ? '过度自信风险较高'
+      : '过度自信风险适中';
+
   return {
     count,
-    message: count >= 6
-      ? `您的持仓过于分散，共 ${count} 只资产`
-      : `您的持仓共 ${count} 只资产，集中度适中`,
-    severity: count >= 8,
+    level,
+    message: `持仓 ${count} 只，${levelText}`,
+    severity: count > 10,
   };
+});
+
+const portfolioRiskCoef = computed(() => {
+  const assets = portfolioAssets.value;
+  if (!assets.length) return 0;
+
+  const sum = assets.reduce((acc, asset) => {
+    const cost = readAssetCost(asset);
+    const current = readAssetCurrentPrice(asset);
+    if (cost == null || current == null) return acc;
+    return acc + Math.abs(current - cost) / cost;
+  }, 0);
+  const validCount = assets.filter((asset) => readAssetCost(asset) != null && readAssetCurrentPrice(asset) != null).length;
+  return validCount > 0 ? sum / validCount : 0;
+});
+
+const emotionIndexPosition = computed(() => Math.min(96, Math.max(4, emotionIndex.value)));
+
+const portfolioPnlPct = computed(() => {
+  const cost = portfolioTotalCost.value;
+  const value = portfolioTotalValue.value;
+  if (cost <= 0) return 0;
+  return ((value - cost) / cost) * 100;
 });
 
 const behaviorEstimate = computed(() => {
   const assets = portfolioAssets.value;
   if (!assets.length) return null;
 
-  const volatilityCoef = assets.reduce((sum, asset) => {
-    if (asset.costPrice <= 0) return sum + 0.8;
-    const vol = Math.abs(asset.currentPrice - asset.costPrice) / asset.costPrice;
-    return sum + Math.min(1.5, Math.max(0.3, vol));
-  }, 0) / assets.length;
-
-  const potentialLoss = Math.min(
-    15000,
-    Math.max(3000, Math.round(assets.length * 1000 * volatilityCoef))
-  );
-
-  const savedTrades = Math.min(12, Math.max(8, 8 + Math.floor((assets.length - 1) / 2)));
-
-  const improvedReturn = Math.min(
-    5,
-    Math.max(2.5, 2.5 + Math.max(0, 8 - assets.length) * 0.35)
-  );
+  const potentialLoss = Math.round(portfolioRiskCoef.value * 1000);
+  const savedTrades = assets.length * 2;
+  const pnl = portfolioPnlPct.value;
+  const improvedReturn = pnl > 0
+    ? Math.round(Math.min(10, 1 + pnl * 0.2) * 10) / 10
+    : Math.round(Math.max(0.5, 1 + pnl * 0.05) * 10) / 10;
 
   return {
     potentialLoss,
     savedTrades,
-    improvedReturn: Math.round(improvedReturn * 10) / 10,
+    improvedReturn,
   };
 });
 
 const getEmotionBgColor = (index: number) => {
   if (index < 30) return 'bg-red-50';
-  if (index <= 60) return 'bg-slate-50';
-  return 'bg-orange-50';
+  if (index <= 60) return 'bg-amber-50';
+  return 'bg-emerald-50';
 };
 
 const getEmotionTextColor = (index: number) => {
   if (index < 30) return 'text-red-700';
-  if (index <= 60) return 'text-slate-600';
-  return 'text-orange-700';
+  if (index <= 60) return 'text-amber-700';
+  return 'text-emerald-700';
 };
 
 const getEmotionLabelColor = (index: number) => {
   if (index < 30) return 'bg-red-100 text-red-700';
-  if (index <= 60) return 'bg-slate-200 text-slate-700';
-  return 'bg-orange-100 text-orange-700';
+  if (index <= 60) return 'bg-amber-100 text-amber-800';
+  return 'bg-emerald-100 text-emerald-700';
 };
 
 const getEmotionBorderColor = (index: number) => {
-  if (index < 30) return 'border-red-200';
-  if (index <= 60) return 'border-slate-200';
-  return 'border-orange-200';
+  if (index < 30) return 'border-red-300';
+  if (index <= 60) return 'border-amber-300';
+  return 'border-emerald-300';
 };
 
 const extremeNews = computed(() => {
@@ -329,6 +500,44 @@ const writeSentimentCache = (data: SentimentData) => {
   }
 };
 
+const fetchPortfolioContext = async () => {
+  if (!hasPortfolio.value) {
+    portfolioContext.value = null;
+    return;
+  }
+
+  isPortfolioContextLoading.value = true;
+  try {
+    const response = await fetch('/api/market/emotion-portfolio-context', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        assets: portfolioAssets.value.map((asset) => ({
+          code: asset.code,
+          name: asset.name,
+          type: asset.type,
+        })),
+      }),
+    });
+    if (!response.ok) {
+      throw new Error('持仓行业数据获取失败');
+    }
+    const data = await response.json() as PortfolioContext & { hot_industries?: string[] };
+    portfolioContext.value = { asset_industries: data.asset_industries };
+  } catch {
+    portfolioContext.value = {
+      asset_industries: portfolioAssets.value.map((asset) => ({
+        code: asset.code,
+        name: asset.name,
+        type: asset.type,
+        industry: asset.type === 'fund' ? '基金' : asset.type === 'bond' ? '债券' : asset.type === 'other' ? '其他' : '综合',
+      })),
+    };
+  } finally {
+    isPortfolioContextLoading.value = false;
+  }
+};
+
 const fetchSentimentData = async () => {
   sentimentError.value = '';
 
@@ -357,10 +566,45 @@ const fetchSentimentData = async () => {
   }
 };
 
-onMounted(() => {
+const handleRefreshQuotes = async () => {
+  if (!hasPortfolio.value || isRefreshingQuotes.value) return;
+
+  isRefreshingQuotes.value = true;
+  quoteRefreshMessage.value = '';
+  try {
+    const result = await portfolioStore.refreshLiveQuotes();
+    if (!result.ok || !result.assets?.length) {
+      quoteRefreshMessage.value = '刷新现价失败，请稍后重试';
+      return;
+    }
+
+    lastQuoteRefreshTime.value = result.updateTime || new Date().toLocaleString('zh-CN');
+    const preview = result.assets
+      .map((row) => `${row.code} ¥${row.current_price ?? '--'}`)
+      .join(' · ');
+    quoteRefreshMessage.value = `已刷新：${preview}`;
+  } finally {
+    isRefreshingQuotes.value = false;
+  }
+};
+
+onMounted(async () => {
   portfolioStore.loadPortfolio();
   fetchSentimentData();
+  if (hasPortfolio.value) {
+    const quoteResult = await portfolioStore.refreshLiveQuotes();
+    if (quoteResult.updateTime) {
+      lastQuoteRefreshTime.value = quoteResult.updateTime;
+    }
+    fetchPortfolioContext();
+  }
 });
+
+watch(portfolioAssets, () => {
+  if (portfolioAssets.value.length > 0) {
+    fetchPortfolioContext();
+  }
+}, { deep: true });
 </script>
 
 <template>
@@ -373,13 +617,25 @@ onMounted(() => {
           <HomeIcon class="w-5 h-5 text-slate-600" />
         </button>
         <h1 class="text-xl font-bold text-slate-900">投资情绪纠偏</h1>
-        <button
-          type="button"
-          @click="showDataSourceModal = true"
-          class="ml-auto text-sm text-indigo-600 hover:text-indigo-800 underline underline-offset-2"
-        >
-          数据来源
-        </button>
+        <div class="ml-auto flex items-center gap-3">
+          <button
+            v-if="hasPortfolio"
+            type="button"
+            :disabled="isRefreshingQuotes"
+            @click="handleRefreshQuotes"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
+          >
+            <RefreshIcon class="w-4 h-4" :class="{ 'animate-spin': isRefreshingQuotes }" />
+            {{ isRefreshingQuotes ? '刷新中…' : '刷新现价' }}
+          </button>
+          <button
+            type="button"
+            @click="showDataSourceModal = true"
+            class="text-sm text-indigo-600 hover:text-indigo-800 underline underline-offset-2"
+          >
+            数据来源
+          </button>
+        </div>
       </div>
     </header>
 
@@ -391,6 +647,14 @@ onMounted(() => {
             基于 Tushare 实时数据计算情绪指数，结合持仓行为分析，帮助您识别并纠正投资情绪偏差。
           </p>
         </div>
+      </div>
+
+      <div
+        v-if="quoteRefreshMessage"
+        class="mb-6 p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-800 text-sm flex flex-wrap items-center justify-between gap-2"
+      >
+        <span>{{ quoteRefreshMessage }}</span>
+        <span v-if="lastQuoteRefreshTime" class="text-xs text-emerald-600">{{ lastQuoteRefreshTime }}</span>
       </div>
 
       <div
@@ -448,12 +712,32 @@ onMounted(() => {
                   {{ emotionStatus }}
                 </div>
               </div>
-              <div class="flex-1">
-                <div class="h-4 bg-gradient-to-r from-red-400 via-slate-300 to-orange-400 rounded-full mb-2"></div>
-                <div class="flex justify-between text-xs text-slate-500">
-                  <span>恐慌 (&lt;30)</span>
-                  <span>平静 (30-60)</span>
-                  <span>贪婪 (&gt;60)</span>
+              <div class="flex-1 min-w-0">
+                <div class="relative pt-8 pb-1">
+                  <div
+                    class="emotion-gradient-bar h-5 w-full rounded-full"
+                    aria-hidden="true"
+                  />
+                  <div
+                    class="absolute top-0 flex flex-col items-center -translate-x-1/2 transition-all duration-500 ease-out"
+                    :style="{ left: `${emotionIndexPosition}%` }"
+                  >
+                    <div
+                      class="emotion-index-marker min-w-[2.25rem] px-2 py-1 text-center text-sm font-bold text-white rounded-full shadow-lg"
+                      :class="emotionIndex < 30 ? 'bg-red-500' : emotionIndex <= 60 ? 'bg-amber-500' : 'bg-emerald-500'"
+                    >
+                      {{ emotionIndex }}
+                    </div>
+                    <div
+                      class="w-0 h-0 border-l-[7px] border-r-[7px] border-t-[8px] border-l-transparent border-r-transparent -mt-px"
+                      :class="emotionIndex < 30 ? 'border-t-red-500' : emotionIndex <= 60 ? 'border-t-amber-500' : 'border-t-emerald-500'"
+                    />
+                  </div>
+                </div>
+                <div class="flex justify-between text-xs font-medium mt-2">
+                  <span class="text-red-500">恐慌 (&lt;30)</span>
+                  <span class="text-amber-500">平静 (30-60)</span>
+                  <span class="text-emerald-500">贪婪 (&gt;60)</span>
                 </div>
                 <div v-if="extremeAlert" class="mt-4 p-3 rounded-lg" :class="getEmotionBgColor(emotionIndex)">
                   <div class="flex items-center gap-2">
@@ -553,17 +837,42 @@ onMounted(() => {
               </button>
             </div>
 
+            <div v-else-if="isPortfolioContextLoading" class="py-6 text-center text-sm text-slate-500">
+              正在加载持仓行业数据...
+            </div>
+
             <div v-else class="space-y-4">
               <div class="p-3 rounded-lg" :class="confirmationBias?.severity ? 'bg-amber-50' : 'bg-slate-50'">
                 <p class="text-sm font-medium text-slate-800 mb-1">确认偏误</p>
+                <p class="text-2xl font-bold text-slate-900 mb-1">{{ confirmationBias?.pct }}%</p>
                 <p class="text-sm text-slate-600">{{ confirmationBias?.message }}</p>
               </div>
               <div class="p-3 rounded-lg" :class="lossAversion?.severity ? 'bg-red-50' : 'bg-slate-50'">
                 <p class="text-sm font-medium text-slate-800 mb-1">损失厌恶</p>
-                <p class="text-sm text-slate-600">{{ lossAversion?.message }}</p>
+                <p class="text-2xl font-bold text-slate-900 mb-1">{{ lossAversion?.count }} 只</p>
+                <p class="text-sm text-slate-600 mb-3">{{ lossAversion?.message }}</p>
+                <ul class="space-y-1.5 text-xs border-t border-slate-200/80 pt-3">
+                  <li
+                    v-for="row in lossAversion?.rows"
+                    :key="row.code"
+                    class="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-slate-600"
+                  >
+                    <span class="font-medium text-slate-700">{{ row.name }}</span>
+                    <span>
+                      cost={{ row.cost ?? '—' }} · current_price={{ row.currentPrice ?? '—' }}
+                      ·
+                      <span
+                        :class="row.status === 'loss' ? 'text-red-600' : row.status === 'profit' ? 'text-emerald-600' : row.status === 'missing' ? 'text-amber-600' : 'text-slate-500'"
+                      >
+                        {{ row.statusLabel }}
+                      </span>
+                    </span>
+                  </li>
+                </ul>
               </div>
               <div class="p-3 rounded-lg" :class="herdMentality?.severity ? 'bg-orange-50' : 'bg-slate-50'">
                 <p class="text-sm font-medium text-slate-800 mb-1">羊群效应</p>
+                <p class="text-2xl font-bold text-slate-900 mb-1">{{ herdMentality?.level }}</p>
                 <p class="text-sm text-slate-600">{{ herdMentality?.message }}</p>
               </div>
               <div class="p-3 rounded-lg" :class="overconfidence?.severity ? 'bg-amber-50' : 'bg-slate-50'">
@@ -601,7 +910,9 @@ onMounted(() => {
                   <p class="text-2xl font-bold text-purple-700">+{{ behaviorEstimate.improvedReturn }}%</p>
                 </div>
               </div>
-              <p class="text-xs text-slate-500 mt-4">基于您的持仓动态估算</p>
+              <p class="text-xs text-slate-500 mt-4">
+                基于真实持仓计算 · 风险系数 {{ portfolioRiskCoef.toFixed(2) }} · 当前盈亏 {{ portfolioPnlPct.toFixed(1) }}%
+              </p>
             </template>
           </div>
 
@@ -690,3 +1001,27 @@ onMounted(() => {
     </Teleport>
   </div>
 </template>
+
+<style scoped>
+.emotion-gradient-bar {
+  background: linear-gradient(
+    90deg,
+    #ef4444 0%,
+    #f97316 28%,
+    #fb923c 42%,
+    #fbbf24 50%,
+    #84cc16 72%,
+    #22c55e 100%
+  );
+  box-shadow:
+    inset 0 1px 2px rgba(255, 255, 255, 0.35),
+    0 4px 14px rgba(239, 68, 68, 0.18),
+    0 2px 6px rgba(34, 197, 94, 0.15);
+}
+
+.emotion-index-marker {
+  box-shadow:
+    0 4px 10px rgba(0, 0, 0, 0.18),
+    0 0 0 3px rgba(255, 255, 255, 0.95);
+}
+</style>

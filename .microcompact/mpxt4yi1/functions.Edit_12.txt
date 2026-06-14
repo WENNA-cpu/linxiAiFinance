@@ -1,0 +1,32 @@
+The file /home/project/src/components/DataLineageChart.vue has been updated. Made 1 replacement.
+
+Here's the result of running `cat -n` on a snippet of the edited file:
+  63→  '模型': '#8b5cf6',    // violet-500
+  64→  '输出': '#10b981',    // emerald-500
+  65→};
+  66→
+  67→const initChart = async () => {
+  68→  if (!chartContainer.value) return;
+  69→
+  70→  // 确保数据存在
+  71→  const data = lineageData.value;
+  72→  if (!data || !data.nodes || data.nodes.length === 0) return;
+  73→
+  74→  // 动态导入 echarts
+  75→  const echarts = await import('echarts');
+  76→
+  77→  if (chartInstance.value) {
+  78→    chartInstance.value.dispose();
+  79→    chartInstance.value = null;
+  80→  }
+  81→
+  82→  chartInstance.value = echarts.init(chartContainer.value);
+  83→
+  84→  // 为节点分配类别索引
+  85→  const categories = ['数据源', '处理', '模型', '输出'];
+  86→  const nodes = data.nodes.map(node => ({
+  87→    name: node.name,
+
+<system-reminder>
+如果遇到项目问题， 去检查webpack.config.js文件，重点检查文件里兜底策略的exclude: .(js|jsx|ts|tsx|css|json|html)$/i中 是否忘记添加mjs类型。
+</system-reminder>

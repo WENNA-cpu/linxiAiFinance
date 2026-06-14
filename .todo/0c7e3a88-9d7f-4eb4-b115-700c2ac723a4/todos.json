@@ -1,0 +1,20 @@
+[
+  {
+    "id": "1",
+    "content": "修改后端 /diagnose 接口，调用Tushare获取真实行情",
+    "status": "in_progress",
+    "priority": "high"
+  },
+  {
+    "id": "2",
+    "content": "修改前端展示真实涨跌幅数据",
+    "status": "pending",
+    "priority": "high"
+  },
+  {
+    "id": "3",
+    "content": "验证修复结果",
+    "status": "pending",
+    "priority": "high"
+  }
+]

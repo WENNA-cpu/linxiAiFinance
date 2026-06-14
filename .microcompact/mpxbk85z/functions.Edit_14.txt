@@ -1,0 +1,52 @@
+The file /home/project/backend/app/api/portfolio.py has been updated. Made 1 replacement.
+
+Here's the result of running `cat -n` on a snippet of the edited file:
+ 270→        opportunities.append("建议关注低估值优质资产的配置机会")
+ 271→
+ 272→    request_id = f"diag_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+ 273→
+ 274→    # 构建资产详情（基于用户成本价计算真实盈亏）
+ 275→    assets_detail = []
+ 276→    for asset in assets:
+ 277→        quote = asset_quotes.get(asset.code)
+ 278→
+ 279→        # 从Tushare获取当前价格（收盘价）
+ 280→        if quote and quote.get('close'):
+ 281→            current_price = quote['close']
+ 282→            trade_date = quote.get('trade_date', '')
+ 283→            data_source = "Tushare实时行情"
+ 284→        elif asset.current_price:
+ 285→            # 使用用户导入的当前价格
+ 286→            current_price = asset.current_price
+ 287→            trade_date = ""
+ 288→            data_source = "用户导入数据"
+ 289→        else:
+ 290→            current_price = 0
+ 291→            trade_date = ""
+ 292→            data_source = "暂无数据"
+ 293→
+ 294→        # 计算基于成本价的盈亏百分比
+ 295→        if asset.cost_price and asset.cost_price > 0 and current_price > 0:
+ 296→            profit_pct = (current_price - asset.cost_price) / asset.cost_price * 100
+ 297→        else:
+ 298→            profit_pct = 0
+ 299→
+ 300→        assets_detail.append({
+ 301→            "code": asset.code,
+ 302→            "name": asset.name,
+ 303→            "weight": asset.weight,
+ 304→            "cost_price": asset.cost_price,
+ 305→            "current_price": current_price,
+ 306→            "profit_pct": round(profit_pct, 2),  # 基于成本价的盈亏百分比
+ 307→            "trade_date": trade_date,  # 数据日期
+ 308→            "data_source": data_source,
+ 309→        })
+ 310→
+ 311→    return {
+ 312→        "request_id": request_id,
+ 313→        "confidence": 85,
+ 314→        "summary": {
+
+<system-reminder>
+如果遇到项目问题， 去检查webpack.config.js文件，重点检查文件里兜底策略的exclude: .(js|jsx|ts|tsx|css|json|html)$/i中 是否忘记添加mjs类型。
+</system-reminder>

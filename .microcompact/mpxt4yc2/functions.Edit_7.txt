@@ -1,0 +1,19 @@
+The file /home/project/src/components/DataLineageChart.vue has been updated. Made 1 replacement.
+
+Here's the result of running `cat -n` on a snippet of the edited file:
+  17→  nodes: LineageNode[];
+  18→  links: LineageLink[];
+  19→}
+  20→
+  21→const props = defineProps<{
+  22→  data?: LineageData | null;
+  23→}>();
+  24→
+  25→const chartContainer = ref<HTMLDivElement | null>(null);
+  26→const chartInstance = ref<any>(null);
+  27→
+  28→// 默认 Mock 数据
+
+<system-reminder>
+如果遇到项目问题， 去检查webpack.config.js文件，重点检查文件里兜底策略的exclude: .(js|jsx|ts|tsx|css|json|html)$/i中 是否忘记添加mjs类型。
+</system-reminder>

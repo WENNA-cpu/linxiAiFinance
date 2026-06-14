@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { usePortfolioStore } from '@/stores/portfolio';
 import RiskBanner from '@/components/RiskBanner.vue';
@@ -18,16 +18,26 @@ import ClockIcon from '@/components/icons/ClockIcon.vue';
 import DatabaseIcon from '@/components/icons/DatabaseIcon.vue';
 import ShieldIcon from '@/components/icons/ShieldIcon.vue';
 import ArrowRightIcon from '@/components/icons/ArrowRightIcon.vue';
+import RefreshIcon from '@/components/icons/RefreshIcon.vue';
 
 const router = useRouter();
 const portfolioStore = usePortfolioStore();
 
 const showDisclaimer = ref(true);
-const feedbackType = ref<'positive' | 'negative' | null>(null);
+const feedbackType = ref<'helpful' | 'unhelpful' | null>(null);
 const feedbackReason = ref('');
-const feedbackSubmitted = ref(false);
+const showNegativeFeedbackForm = ref(false);
 const feedbackSubmitting = ref(false);
+/** 当前选中的反馈类型，提交成功后保持高亮 */
+const activeFeedbackChoice = ref<'helpful' | 'unhelpful' | null>(null);
+
+const isHelpfulActive = computed(() => activeFeedbackChoice.value === 'helpful');
+const isUnhelpfulActive = computed(
+  () => activeFeedbackChoice.value === 'unhelpful' || showNegativeFeedbackForm.value,
+);
 const isLoading = ref(false);
+const isRefreshingQuotes = ref(false);
+const lastQuoteRefreshTime = ref('');
 const diagnosisError = ref('');
 const diagnosisData = ref<any>(null);
 
@@ -58,6 +68,44 @@ const normalizeDiagnosis = (raw: any) => {
     },
     detail: raw.detail || { assets: [] },
     audit_logs: raw.audit_logs || [],
+  };
+};
+
+const FUND_MOCK_QUOTES: Record<string, { close: number; pct_chg: number; trade_date: string }> = {
+  '510050': { close: 2.923, pct_chg: 0.62, trade_date: '20260611' },
+};
+
+const isFundCode = (code: string, type?: string) =>
+  type === 'fund' || type === 'etf' || /^(51|50|15|16|18)/.test(code.replace(/\.(SH|SZ)$/i, ''));
+
+const buildFallbackAssetDetail = (asset: { code: string; name: string; type: string; quantity: number; costPrice: number; marketValue: number }, totalValue: number) => {
+  const qty = asset.quantity || 0;
+  const costPrice = asset.costPrice || 0;
+  const positionCost = costPrice * qty;
+  const bareCode = asset.code.replace(/\.(SH|SZ)$/i, '');
+  const mock = isFundCode(asset.code, asset.type) ? FUND_MOCK_QUOTES[bareCode] : undefined;
+  const storePrice = asset.currentPrice > 0 ? asset.currentPrice : null;
+  const currentPrice = mock?.close ?? storePrice;
+  const marketValue = currentPrice !== null ? currentPrice * qty : null;
+  const profitAmount = marketValue !== null ? marketValue - positionCost : null;
+  const profitPct = currentPrice !== null && costPrice > 0 ? ((currentPrice - costPrice) / costPrice) * 100 : null;
+
+  return {
+    code: asset.code,
+    name: asset.name,
+    asset_type: asset.type,
+    quantity: qty,
+    weight: asset.marketValue / totalValue,
+    cost_price: costPrice,
+    current_price: currentPrice,
+    position_cost: positionCost,
+    market_value: marketValue,
+    profit_amount: profitAmount,
+    profit_pct: profitPct,
+    today_change_pct: mock?.pct_chg ?? null,
+    trade_date: mock?.trade_date ?? '',
+    price_status: currentPrice !== null ? 'cached' : 'pending',
+    data_source: mock ? 'Mock净值' : '数据更新中',
   };
 };
 
@@ -98,17 +146,7 @@ const buildFallbackDiagnosis = () => {
       update_time: new Date().toLocaleString('zh-CN'),
     },
     detail: {
-      assets: assets.map((a) => ({
-        code: a.code,
-        name: a.name,
-        weight: a.marketValue / totalValue,
-        cost_price: a.costPrice,
-        current_price: a.currentPrice,
-        profit_pct: a.costPrice > 0
-          ? ((a.currentPrice - a.costPrice) / a.costPrice) * 100
-          : 0,
-        data_source: '用户导入数据',
-      })),
+      assets: assets.map((a) => buildFallbackAssetDetail(a, totalValue)),
     },
   });
 };
@@ -119,6 +157,19 @@ const applyDiagnosis = (raw: any) => {
   diagnosisData.value = normalized;
   localStorage.setItem(`diagnosis_${normalized.request_id}`, JSON.stringify(normalized));
   localStorage.setItem('last_diagnosis_id', normalized.request_id);
+
+  const backendAssets = normalized.detail?.assets ?? [];
+  if (backendAssets.length > 0) {
+    portfolioStore.syncQuotesFromBackend(
+      backendAssets.map((asset: BackendAsset) => ({
+        code: asset.code,
+        current_price: asset.current_price,
+        market_value: asset.market_value,
+        trade_date: asset.trade_date,
+        data_source: asset.data_source,
+      })),
+    );
+  }
 };
 
 // 调用后端 API 获取诊断结果
@@ -128,9 +179,10 @@ const fetchDiagnosis = async () => {
 
   isLoading.value = true;
   diagnosisError.value = '';
+  diagnosisData.value = null;
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 45000);
+  const timeoutId = setTimeout(() => controller.abort(), 90000);
 
   try {
     const totalValue = portfolioStore.portfolio.totalValue || 1;
@@ -140,7 +192,8 @@ const fetchDiagnosis = async () => {
         name: a.name,
         weight: a.marketValue / totalValue,
         cost_price: a.costPrice,
-        current_price: a.currentPrice,
+        quantity: a.quantity,
+        asset_type: a.type,
       })),
       total_value: portfolioStore.portfolio.totalValue,
     };
@@ -251,12 +304,108 @@ interface BackendAsset {
   code: string;
   name: string;
   weight: number;
+  asset_type?: string;
+  quantity?: number;
   cost_price?: number;
-  current_price?: number;
-  profit_pct?: number;  // 基于成本价的盈亏百分比
-  trade_date?: string;  // 数据日期
+  current_price?: number | null;
+  position_cost?: number;
+  market_value?: number | null;
+  profit_amount?: number | null;
+  profit_pct?: number | null;
+  today_change_pct?: number | null;
+  trade_date?: string;
   data_source?: string;
+  price_status?: 'live' | 'cached' | 'pending';
 }
+
+const formatMoney = (value?: number | null) => {
+  if (value === null || value === undefined || Number.isNaN(value)) return '--';
+  return value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+};
+
+const quantityUnit = (type: string) => (type === 'fund' ? '份' : '股');
+
+const formatTradeDate = (tradeDate?: string) => {
+  if (!tradeDate || tradeDate.length !== 8) return '';
+  return `${tradeDate.slice(0, 4)}-${tradeDate.slice(4, 6)}-${tradeDate.slice(6, 8)}`;
+};
+
+const normalizeAssetCode = (code: string) => code.replace(/\.(SH|SZ|sh|sz)$/i, '');
+
+const findBackendAsset = (code: string, map: Map<string, BackendAsset>) =>
+  map.get(code) ?? map.get(normalizeAssetCode(code));
+
+const resolveAssetQuote = (
+  asset: {
+    code: string;
+    type: string;
+    quantity?: number;
+    costPrice?: number;
+    currentPrice?: number;
+    marketValue?: number;
+  },
+  backendAsset?: BackendAsset,
+) => {
+  if (asset.currentPrice != null && asset.currentPrice > 0) {
+    const qty = asset.quantity ?? backendAsset?.quantity ?? 0;
+    const costPrice = asset.costPrice ?? backendAsset?.cost_price ?? 0;
+    const positionCost = costPrice * qty;
+    const marketValue = asset.marketValue ?? asset.currentPrice * qty;
+    const profitAmount = marketValue - positionCost;
+    const profitPct =
+      costPrice > 0 ? ((asset.currentPrice - costPrice) / costPrice) * 100 : null;
+
+    return {
+      currentPrice: asset.currentPrice,
+      todayChangePct: backendAsset?.today_change_pct ?? null,
+      tradeDate: backendAsset?.trade_date || '',
+      dataSource: backendAsset?.data_source || 'Tushare行情',
+      priceStatus: 'live' as const,
+      profitPct,
+      marketValue,
+      profitAmount,
+    };
+  }
+
+  if (backendAsset?.current_price != null && backendAsset.current_price > 0) {
+    return {
+      currentPrice: backendAsset.current_price,
+      todayChangePct: backendAsset.today_change_pct ?? null,
+      tradeDate: backendAsset.trade_date || '',
+      dataSource: backendAsset.data_source || 'Tushare行情',
+      priceStatus: backendAsset.price_status || 'live',
+      profitPct: backendAsset.profit_pct ?? null,
+      marketValue: backendAsset.market_value ?? null,
+      profitAmount: backendAsset.profit_amount ?? null,
+    };
+  }
+
+  const bareCode = normalizeAssetCode(asset.code);
+  const mock = isFundCode(asset.code, asset.type) ? FUND_MOCK_QUOTES[bareCode] : undefined;
+  if (mock) {
+    return {
+      currentPrice: mock.close,
+      todayChangePct: mock.pct_chg,
+      tradeDate: mock.trade_date,
+      dataSource: 'Mock净值',
+      priceStatus: 'cached' as const,
+      profitPct: null,
+      marketValue: null,
+      profitAmount: null,
+    };
+  }
+
+  return {
+    currentPrice: null,
+    todayChangePct: null,
+    tradeDate: '',
+    dataSource: '数据更新中',
+    priceStatus: 'pending' as const,
+    profitPct: null,
+    marketValue: null,
+    profitAmount: null,
+  };
+};
 
 const assetAnalysis = computed(() => {
   const assets = portfolioStore.portfolio.assets;
@@ -265,23 +414,47 @@ const assetAnalysis = computed(() => {
   }
 
   const backendAssets: BackendAsset[] = diagnosisData.value?.detail?.assets || [];
-  const backendAssetsMap = new Map(backendAssets.map((a) => [a.code, a]));
+  const backendAssetsMap = new Map(
+    backendAssets.flatMap((a) => [[a.code, a], [normalizeAssetCode(a.code), a]] as const),
+  );
 
-  return assets.map(asset => {
-    const backendAsset = backendAssetsMap.get(asset.code);
-    const profitPct = backendAsset?.profit_pct ?? (
-      asset.costPrice > 0 && asset.currentPrice > 0
-        ? ((asset.currentPrice - asset.costPrice) / asset.costPrice) * 100
-        : 0
-    );
+  return assets.map((asset) => {
+    const backendAsset = findBackendAsset(asset.code, backendAssetsMap);
+    const quote = resolveAssetQuote(asset, backendAsset);
+
+    const qty = asset.quantity ?? backendAsset?.quantity ?? 0;
+    const costPrice = asset.costPrice ?? backendAsset?.cost_price ?? 0;
+    const positionCost = costPrice * qty;
+
+    const currentPrice = quote.currentPrice;
+    const marketValue = quote.marketValue ?? (currentPrice !== null ? currentPrice * qty : null);
+    const profitAmount = quote.profitAmount ?? (marketValue !== null ? marketValue - positionCost : null);
+    const profitPct =
+      quote.profitPct ??
+      (currentPrice !== null && costPrice > 0
+        ? ((currentPrice - costPrice) / costPrice) * 100
+        : null);
 
     return {
       ...asset,
+      quantity: qty,
+      costPrice,
+      currentPrice,
+      positionCost,
+      marketValue,
+      profitAmount,
       returnRate: profitPct,
-      dataSource: backendAsset?.data_source || '用户持仓数据',
-      tradeDate: backendAsset?.trade_date || '',
-      riskLevel: profitPct < -5 ? 'high' : profitPct > 5 ? 'low' : 'medium',
-      trend: profitPct >= 0 ? 'up' : 'down',
+      todayChangePct: quote.todayChangePct,
+      priceStatus: quote.priceStatus,
+      dataSource: quote.dataSource,
+      tradeDate: quote.tradeDate,
+      riskLevel:
+        profitPct !== null && profitPct < -5
+          ? 'high'
+          : profitPct !== null && profitPct > 5
+            ? 'low'
+            : 'medium',
+      trend: profitPct !== null && profitPct >= 0 ? 'up' : 'down',
     };
   });
 });
@@ -312,6 +485,72 @@ const hideToast = () => {
   }, 300);
 };
 
+const patchDiagnosisQuotes = (rows: Array<{
+  code: string;
+  current_price?: number | null;
+  market_value?: number | null;
+  trade_date?: string;
+  data_source?: string;
+  today_change_pct?: number | null;
+}>) => {
+  if (!diagnosisData.value?.detail?.assets?.length) return;
+
+  const quoteMap = new Map<string, typeof rows[number]>();
+  rows.forEach((row) => {
+    quoteMap.set(row.code, row);
+    quoteMap.set(normalizeAssetCode(row.code), row);
+  });
+
+  const assets = diagnosisData.value.detail.assets.map((ba) => {
+    const quote = quoteMap.get(ba.code) ?? quoteMap.get(normalizeAssetCode(ba.code));
+    if (!quote?.current_price) return ba;
+    const qty = ba.quantity ?? 0;
+    const cost = ba.cost_price ?? 0;
+    const positionCost = cost * qty;
+    const marketValue = quote.market_value ?? quote.current_price * qty;
+    return {
+      ...ba,
+      current_price: quote.current_price,
+      market_value: marketValue,
+      position_cost: positionCost,
+      profit_amount: marketValue - positionCost,
+      profit_pct: cost > 0 ? ((quote.current_price - cost) / cost) * 100 : null,
+      trade_date: quote.trade_date ?? ba.trade_date,
+      data_source: quote.data_source ?? ba.data_source,
+      today_change_pct: quote.today_change_pct ?? ba.today_change_pct,
+      price_status: 'live' as const,
+    };
+  });
+
+  diagnosisData.value = {
+    ...diagnosisData.value,
+    detail: { ...diagnosisData.value.detail, assets },
+  };
+};
+
+const handleRefreshQuotes = async () => {
+  if (!hasRealData.value || isRefreshingQuotes.value) return;
+
+  isRefreshingQuotes.value = true;
+  try {
+    const result = await portfolioStore.refreshLiveQuotes();
+    if (!result.ok || !result.assets?.length) {
+      showToast('刷新现价失败，请稍后重试', 'error');
+      return;
+    }
+
+    patchDiagnosisQuotes(result.assets);
+    lastQuoteRefreshTime.value = result.updateTime || new Date().toLocaleString('zh-CN');
+    const preview = result.assets
+      .slice(0, 2)
+      .map((row) => `${row.code} ¥${row.current_price ?? '--'}`)
+      .join('、');
+    showToast(`现价已刷新${preview ? `：${preview}` : ''}`, 'success');
+  } finally {
+    isRefreshingQuotes.value = false;
+  }
+};
+
 const showToast = (message: string, type: ToastType) => {
   if (toastTimer) clearTimeout(toastTimer);
   if (toastFadeTimer) clearTimeout(toastFadeTimer);
@@ -319,30 +558,39 @@ const showToast = (message: string, type: ToastType) => {
   toastTimer = setTimeout(() => hideToast(), 2500);
 };
 
-const handleFeedbackClick = async (type: 'positive' | 'negative') => {
+const handleFeedbackClick = async (type: 'helpful' | 'unhelpful') => {
   if (feedbackSubmitting.value) return;
-  feedbackType.value = type;
-  await submitFeedback(type === 'negative' ? '' : undefined);
+
+  if (type === 'helpful') {
+    activeFeedbackChoice.value = 'helpful';
+    showNegativeFeedbackForm.value = false;
+    feedbackReason.value = '';
+    await submitFeedback('helpful');
+    return;
+  }
+
+  activeFeedbackChoice.value = 'unhelpful';
+  showNegativeFeedbackForm.value = true;
+  feedbackType.value = 'unhelpful';
 };
 
-const submitFeedback = async (reasonOverride?: string) => {
+const submitFeedback = async (type: 'helpful' | 'unhelpful', reason = '') => {
   const requestId = diagnosisResult.value.requestId;
   if (!requestId || requestId === '-') {
     showToast('暂无诊断记录，无法提交反馈', 'error');
     return;
   }
-  if (!feedbackType.value) return;
 
   feedbackSubmitting.value = true;
+  feedbackType.value = type;
   try {
-    const reason = reasonOverride !== undefined ? reasonOverride : feedbackReason.value;
-    const response = await fetch('/api/feedback', {
+    const response = await fetch('/api/feedback/', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         request_id: requestId,
-        feedback_type: feedbackType.value === 'positive' ? 'helpful' : 'unhelpful',
-        reason: reason || '',
+        feedback_type: type,
+        reason: type === 'unhelpful' ? reason.trim() : '',
       }),
     });
 
@@ -351,15 +599,19 @@ const submitFeedback = async (reasonOverride?: string) => {
       throw new Error(errBody.detail || `反馈提交失败 (${response.status})`);
     }
 
-    const data = await response.json();
-    feedbackSubmitted.value = true;
-    showToast(data.message || '感谢您的反馈，这能帮助我们做得更好！', 'success');
+    showToast('感谢您的反馈', 'success');
+    activeFeedbackChoice.value = type;
 
-    if (feedbackType.value === 'positive') {
+    if (type === 'unhelpful') {
       feedbackReason.value = '';
+      showNegativeFeedbackForm.value = false;
     }
+    feedbackType.value = null;
   } catch (err) {
     showToast(err instanceof Error ? err.message : '反馈提交失败，请稍后重试', 'error');
+    if (type === 'helpful') {
+      activeFeedbackChoice.value = null;
+    }
   } finally {
     feedbackSubmitting.value = false;
   }
@@ -370,7 +622,7 @@ const submitNegativeReason = async () => {
     showToast('请先填写改进建议', 'error');
     return;
   }
-  await submitFeedback(feedbackReason.value);
+  await submitFeedback('unhelpful', feedbackReason.value);
 };
 
 // 合规追问助手
@@ -380,42 +632,128 @@ const followUpStatus = ref<'idle' | 'blocked' | 'passed' | 'error'>('idle');
 const followUpBlockedReason = ref('');
 const followUpAnswer = ref('');
 
-const followUpSuggestions = [
-  '这只股票现在能买吗？',
-  '风险高怎么办？',
-  '当前估值合理吗',
-];
+/** 追问助手当前选中的资产（默认第一只，可点击资产卡片切换） */
+const selectedFollowUpAssetCode = ref('');
+
+const selectedFollowUpAsset = computed(() => {
+  const assets = assetAnalysis.value;
+  if (!assets.length) return null;
+  return assets.find((asset) => asset.code === selectedFollowUpAssetCode.value) ?? assets[0];
+});
+
+watch(
+  () => assetAnalysis.value.map((asset) => asset.code).join(','),
+  () => {
+    const assets = assetAnalysis.value;
+    if (!assets.length) {
+      selectedFollowUpAssetCode.value = '';
+      return;
+    }
+    const stillSelected = assets.some((asset) => asset.code === selectedFollowUpAssetCode.value);
+    if (!selectedFollowUpAssetCode.value || !stillSelected) {
+      selectedFollowUpAssetCode.value = assets[0].code;
+    }
+  },
+  { immediate: true },
+);
+
+const selectFollowUpAsset = (code: string) => {
+  selectedFollowUpAssetCode.value = code;
+};
+
+const followUpSuggestions = computed(() => {
+  const name = selectedFollowUpAsset.value?.name;
+  if (!name) return [];
+  return [
+    `${name}当前估值合理吗？`,
+    `${name}现在能买吗？`,
+    `${name}风险高怎么办？`,
+  ];
+});
+
+const followUpPlaceholder = computed(() => {
+  const name = selectedFollowUpAsset.value?.name ?? '某资产';
+  return `输入追问，如：${name}当前估值合理吗？`;
+});
+
+/** 防抖 + 去重：避免连点/Enter 重复提交同一问题 */
+const FOLLOWUP_DEBOUNCE_MS = 400;
+const FOLLOWUP_DEDUP_MS = 3000;
+let followUpDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+const lastFollowUpSignature = ref('');
+const lastFollowUpAt = ref(0);
+
+const buildFollowUpSignature = (question: string) =>
+  `${diagnosisContext.value.request_id ?? 'local'}::${question}`;
+
+const isDuplicateFollowUp = (question: string) => {
+  const signature = buildFollowUpSignature(question);
+  const now = Date.now();
+  return (
+    signature === lastFollowUpSignature.value &&
+    now - lastFollowUpAt.value < FOLLOWUP_DEDUP_MS
+  );
+};
+
+const markFollowUpSubmitted = (question: string) => {
+  lastFollowUpSignature.value = buildFollowUpSignature(question);
+  lastFollowUpAt.value = Date.now();
+};
+
+const toTsCode = (code: string) => {
+  const normalized = code.trim().toUpperCase();
+  if (/\.(SH|SZ)$/.test(normalized)) return normalized;
+  const bare = normalized.replace(/\.(SH|SZ)$/, '');
+  if (bare.startsWith('6') || bare.startsWith('5') || bare.startsWith('9')) return `${bare}.SH`;
+  return `${bare}.SZ`;
+};
+
+const riskLevelLabel = (level: string) =>
+  level === 'high' ? '高' : level === 'low' ? '低' : '中';
 
 const diagnosisContext = computed(() => {
-  const primary = assetAnalysis.value[0];
-  const riskLabel =
-    primary?.riskLevel === 'high' ? '高' : primary?.riskLevel === 'low' ? '低' : '中';
+  const assets = assetAnalysis.value.map((asset) => ({
+    name: asset.name,
+    ts_code: toTsCode(asset.code),
+    code: asset.code,
+    change_pct: asset.returnRate ?? null,
+    today_change_pct: asset.todayChangePct ?? null,
+    risk_level: riskLevelLabel(asset.riskLevel),
+    cost_price: asset.costPrice ?? null,
+    current_price: asset.currentPrice ?? null,
+    quantity: asset.quantity ?? null,
+  }));
 
-  let interval = '震荡整理';
-  const trend = diagnosisResult.value.analysis.marketTrend;
-  if (trend.includes('上涨') || trend.includes('偏多')) interval = '偏高估/强势';
-  else if (trend.includes('下跌') || trend.includes('偏空')) interval = '偏低估/弱势';
+  const totalChangeRaw = diagnosisData.value?.detail?.total_change_pct;
+  const totalChange =
+    totalChangeRaw != null
+      ? Number(totalChangeRaw)
+      : assets.length
+        ? assets.reduce((sum, a) => sum + (a.change_pct ?? 0), 0) / assets.length
+        : 0;
+
+  const marketTrend = diagnosisResult.value.analysis.marketTrend;
+  const sectorRotation = diagnosisResult.value.analysis.sectorRotation;
 
   return {
-    asset_name: primary?.name || '综合持仓',
-    interval,
-    risk_level: riskLabel,
-    change_pct: primary?.returnRate ?? 0,
+    assets,
+    summary: {
+      total_change: totalChange,
+      total_assets: assets.length,
+      market_trend: marketTrend,
+      sector_rotation: sectorRotation,
+    },
     request_id: diagnosisResult.value.requestId !== '-' ? diagnosisResult.value.requestId : undefined,
-    market_trend: diagnosisResult.value.analysis.marketTrend,
-    sector_rotation: diagnosisResult.value.analysis.sectorRotation,
+    // 兼容旧字段
+    asset_name: assets[0]?.name || '综合持仓',
+    change_pct: assets[0]?.change_pct ?? 0,
+    risk_level: assets[0]?.risk_level || '中',
+    market_trend: marketTrend,
+    sector_rotation: sectorRotation,
   };
 });
 
-const sendFollowUp = async (questionText?: string) => {
-  const question = (questionText ?? followUpQuestion.value).trim();
-  if (!question || followUpLoading.value) return;
-
-  if (!diagnosisData.value) {
-    showToast('请先完成诊断后再追问', 'error');
-    return;
-  }
-
+const executeFollowUp = async (question: string) => {
   followUpLoading.value = true;
   followUpStatus.value = 'idle';
   followUpBlockedReason.value = '';
@@ -423,28 +761,6 @@ const sendFollowUp = async (questionText?: string) => {
   followUpQuestion.value = question;
 
   try {
-    const checkRes = await fetch('/api/rule/check', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        question,
-        request_id: diagnosisContext.value.request_id,
-      }),
-    });
-
-    const checkData = await checkRes.json().catch(() => ({}));
-    if (!checkRes.ok) {
-      throw new Error(checkData.detail || `合规检查失败 (${checkRes.status})`);
-    }
-
-    if (checkData.is_blocked) {
-      followUpStatus.value = 'blocked';
-      followUpBlockedReason.value = checkData.blocked_reason || '该问题已被合规规则拦截';
-      return;
-    }
-
-    followUpStatus.value = 'passed';
-
     const chatRes = await fetch('/api/diagnose/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -456,21 +772,46 @@ const sendFollowUp = async (questionText?: string) => {
 
     const chatData = await chatRes.json().catch(() => ({}));
     if (!chatRes.ok) {
-      if (chatRes.status === 403) {
-        followUpStatus.value = 'blocked';
-        followUpBlockedReason.value = chatData.detail || '该问题已被合规规则拦截';
-        return;
-      }
-      throw new Error(chatData.detail || `回答生成失败 (${chatRes.status})`);
+      throw new Error(chatData.detail || chatData.message || `追问失败 (${chatRes.status})`);
     }
 
-    followUpAnswer.value = chatData.answer;
+    if (chatData.blocked) {
+      followUpStatus.value = 'blocked';
+      followUpBlockedReason.value = chatData.message || '该问题已被合规规则拦截';
+      return;
+    }
+
+    followUpStatus.value = 'passed';
+    followUpAnswer.value = chatData.answer || '';
   } catch (err) {
     followUpStatus.value = 'error';
     followUpBlockedReason.value = err instanceof Error ? err.message : '追问失败，请稍后重试';
   } finally {
     followUpLoading.value = false;
   }
+};
+
+const sendFollowUp = (questionText?: string) => {
+  const question = (questionText ?? followUpQuestion.value).trim();
+  if (!question || followUpLoading.value) return;
+
+  if (!diagnosisData.value) {
+    showToast('请先完成诊断后再追问', 'error');
+    return;
+  }
+
+  if (isDuplicateFollowUp(question)) return;
+
+  markFollowUpSubmitted(question);
+
+  if (followUpDebounceTimer) {
+    clearTimeout(followUpDebounceTimer);
+  }
+
+  followUpDebounceTimer = setTimeout(() => {
+    followUpDebounceTimer = null;
+    void executeFollowUp(question);
+  }, FOLLOWUP_DEBOUNCE_MS);
 };
 
 const onFollowUpKeydown = (e: KeyboardEvent) => {
@@ -484,8 +825,17 @@ const viewTraceability = () => {
   router.push(`/trace/${diagnosisResult.value.requestId}`);
 };
 
-onMounted(() => {
+onMounted(async () => {
   portfolioStore.loadPortfolio();
+
+  if (portfolioStore.portfolio.assets.length > 0) {
+    const quoteResult = await portfolioStore.refreshLiveQuotes();
+    if (quoteResult.updateTime) {
+      lastQuoteRefreshTime.value = quoteResult.updateTime;
+    }
+    fetchDiagnosis();
+    return;
+  }
 
   const lastId = localStorage.getItem('last_diagnosis_id');
   if (lastId) {
@@ -509,6 +859,7 @@ onMounted(() => {
 onUnmounted(() => {
   if (toastTimer) clearTimeout(toastTimer);
   if (toastFadeTimer) clearTimeout(toastFadeTimer);
+  if (followUpDebounceTimer) clearTimeout(followUpDebounceTimer);
 });
 </script>
 
@@ -522,6 +873,20 @@ onUnmounted(() => {
           <HomeIcon class="w-5 h-5 text-slate-600" />
         </button>
         <h1 class="text-xl font-bold text-slate-900">持仓诊断结果</h1>
+        <div v-if="hasRealData" class="ml-auto flex items-center gap-3">
+          <span v-if="lastQuoteRefreshTime" class="text-xs text-slate-400 hidden sm:inline">
+            现价 {{ lastQuoteRefreshTime }}
+          </span>
+          <button
+            type="button"
+            :disabled="isRefreshingQuotes"
+            @click="handleRefreshQuotes"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
+          >
+            <RefreshIcon class="w-4 h-4" :class="{ 'animate-spin': isRefreshingQuotes }" />
+            {{ isRefreshingQuotes ? '刷新中…' : '刷新现价' }}
+          </button>
+        </div>
       </div>
     </header>
 
@@ -634,43 +999,111 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- 资产明细分析 - 只在有数据时显示 -->
+          <!-- 资产明细分析 -->
           <div v-if="assetAnalysis.length > 0" class="bg-white rounded-xl border border-slate-200 p-6">
             <div class="flex items-center justify-between mb-4">
               <h2 class="text-lg font-semibold text-slate-900">资产明细分析</h2>
-              <span class="text-xs text-slate-400">持仓盈亏（基于成本价）</span>
+              <span class="text-xs text-slate-400">红涨绿跌（今日）· 红赚绿亏（持仓）</span>
             </div>
-            <div class="space-y-3">
+            <div class="space-y-4">
               <div
                 v-for="asset in assetAnalysis"
                 :key="asset.code"
-                class="flex items-center justify-between p-4 bg-slate-50 rounded-lg"
+                class="p-4 rounded-lg border cursor-pointer transition-colors"
+                :class="selectedFollowUpAssetCode === asset.code
+                  ? 'bg-indigo-50/60 border-indigo-300 ring-1 ring-indigo-200'
+                  : 'bg-slate-50 border-slate-100 hover:border-indigo-200'"
+                @click="selectFollowUpAsset(asset.code)"
               >
-                <div class="flex items-center gap-3">
-                  <div
-                    class="w-10 h-10 rounded-lg flex items-center justify-center"
-                    :class="asset.returnRate >= 0 ? 'bg-red-100' : 'bg-green-100'"
-                  >
-                    <component
-                      :is="asset.returnRate >= 0 ? TrendingUpIcon : TrendingDownIcon"
-                      class="w-5 h-5"
-                      :class="asset.returnRate >= 0 ? 'text-red-600' : 'text-green-600'"
-                    />
+                <div class="flex items-start justify-between gap-4 mb-4">
+                  <div class="min-w-0">
+                    <p class="font-medium text-slate-900 text-base">{{ asset.name }}</p>
+                    <p class="text-sm text-slate-500 mt-0.5">
+                      {{ asset.code }} · {{ asset.type === 'stock' ? '股票' : asset.type === 'fund' ? '基金' : '其他' }}
+                    </p>
                   </div>
-                  <div>
-                    <p class="font-medium text-slate-900">{{ asset.name }}</p>
-                    <p class="text-sm text-slate-500">{{ asset.code }} · {{ asset.type === 'stock' ? '股票' : asset.type === 'fund' ? '基金' : '其他' }}</p>
+                  <div class="flex flex-col items-end gap-1 flex-shrink-0">
+                    <div class="text-right">
+                      <p class="text-[11px] text-slate-500 mb-0.5">持仓盈亏</p>
+                      <p
+                        v-if="asset.returnRate !== null"
+                        class="font-semibold text-lg leading-none"
+                        :class="asset.returnRate >= 0 ? 'text-red-600' : 'text-green-600'"
+                      >
+                        {{ asset.returnRate >= 0 ? '▲ +' : '▼ ' }}{{ asset.returnRate.toFixed(2) }}%
+                      </p>
+                      <p v-else class="text-sm text-slate-400">--</p>
+                    </div>
+                    <div class="text-right">
+                      <p class="text-[11px] text-slate-500 mb-0.5">今日涨跌</p>
+                      <p
+                        v-if="asset.todayChangePct !== null"
+                        class="text-sm font-medium"
+                        :class="asset.todayChangePct >= 0 ? 'text-red-600' : 'text-green-600'"
+                      >
+                        {{ asset.todayChangePct >= 0 ? '▲ +' : '▼ ' }}{{ asset.todayChangePct.toFixed(2) }}%
+                      </p>
+                      <p v-else class="text-sm text-slate-400">数据更新中</p>
+                    </div>
                   </div>
                 </div>
-                <div class="text-right">
-                  <p class="font-medium" :class="asset.returnRate >= 0 ? 'text-red-600' : 'text-green-600'">
-                    {{ asset.returnRate >= 0 ? '▲ +' : '▼ ' }}{{ asset.returnRate.toFixed(2) }}%
-                  </p>
-                  <p class="text-xs text-slate-400">
-                    {{ asset.dataSource }}
-                    <span v-if="asset.tradeDate">· {{ asset.tradeDate }}</span>
-                    <span v-else-if="asset.dataSource === '用户导入数据'">· 数据截至昨日收盘</span>
-                  </p>
+
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-3 text-sm border-t border-slate-200 pt-3">
+                  <div>
+                    <p class="text-xs text-slate-500">成本价（买入价）</p>
+                    <p class="font-semibold text-slate-900">{{ formatMoney(asset.costPrice) }} 元</p>
+                  </div>
+                  <div>
+                    <p class="text-xs text-slate-500">持仓数量</p>
+                    <p class="font-semibold text-slate-900">{{ asset.quantity }} {{ quantityUnit(asset.type) }}</p>
+                  </div>
+                  <div>
+                    <p class="text-xs text-slate-500">持仓成本</p>
+                    <p class="font-semibold text-slate-900">{{ formatMoney(asset.positionCost) }} 元</p>
+                  </div>
+                  <div>
+                    <p class="text-xs text-slate-500">当前价</p>
+                    <p class="font-semibold text-slate-900">
+                      <template v-if="asset.currentPrice !== null">{{ formatMoney(asset.currentPrice) }} 元</template>
+                      <template v-else>数据更新中</template>
+                    </p>
+                    <p v-if="asset.currentPrice !== null && asset.tradeDate" class="text-[11px] text-slate-400">
+                      {{ formatTradeDate(asset.tradeDate) }} 收盘
+                    </p>
+                  </div>
+                  <div>
+                    <p class="text-xs text-slate-500">当前市值</p>
+                    <p class="font-semibold text-slate-900">
+                      <template v-if="asset.marketValue !== null">{{ formatMoney(asset.marketValue) }} 元</template>
+                      <template v-else>数据更新中</template>
+                    </p>
+                  </div>
+                  <div>
+                    <p class="text-xs text-slate-500">盈亏金额</p>
+                    <p
+                      v-if="asset.profitAmount !== null"
+                      class="font-semibold"
+                      :class="asset.profitAmount >= 0 ? 'text-red-600' : 'text-green-600'"
+                    >
+                      {{ asset.profitAmount >= 0 ? '+' : '' }}{{ formatMoney(asset.profitAmount) }} 元
+                    </p>
+                    <p v-else class="font-semibold text-slate-400">数据更新中</p>
+                  </div>
+                  <div>
+                    <p class="text-xs text-slate-500">盈亏百分比</p>
+                    <p
+                      v-if="asset.returnRate !== null"
+                      class="font-semibold"
+                      :class="asset.returnRate >= 0 ? 'text-red-600' : 'text-green-600'"
+                    >
+                      {{ asset.returnRate >= 0 ? '+' : '' }}{{ asset.returnRate.toFixed(2) }}%
+                    </p>
+                    <p v-else class="font-semibold text-slate-400">--</p>
+                  </div>
+                  <div>
+                    <p class="text-xs text-slate-500">行情来源</p>
+                    <p class="text-xs font-medium text-slate-600">{{ asset.dataSource }}</p>
+                  </div>
                 </div>
               </div>
             </div>
@@ -741,30 +1174,31 @@ onUnmounted(() => {
           <div class="bg-white rounded-xl border border-slate-200 p-6">
             <h2 class="text-lg font-semibold text-slate-900 mb-4">AI反馈</h2>
             <p class="text-sm text-slate-500 mb-4">这个分析对您有帮助吗？</p>
-            <div v-if="feedbackSubmitted && feedbackType === 'positive'" class="text-sm text-emerald-600 mb-3">
-              已收到您的反馈，感谢支持！
-            </div>
             <div class="flex gap-3">
               <button
-                @click="handleFeedbackClick('positive')"
-                :disabled="feedbackSubmitting || (feedbackSubmitted && feedbackType === 'positive')"
-                class="flex-1 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
-                :class="feedbackType === 'positive' ? 'bg-emerald-50 border-emerald-500 text-emerald-600' : ''"
+                @click="handleFeedbackClick('helpful')"
+                :disabled="feedbackSubmitting"
+                class="flex-1 py-2.5 border-2 rounded-lg transition-all flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed font-medium"
+                :class="isHelpfulActive
+                  ? 'bg-emerald-50 border-emerald-500 text-emerald-700 shadow-sm'
+                  : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'"
               >
-                <ThumbsUpIcon class="w-4 h-4" />
-                {{ feedbackSubmitting && feedbackType === 'positive' ? '提交中...' : '有帮助' }}
+                <ThumbsUpIcon class="w-4 h-4" :class="isHelpfulActive ? 'text-emerald-600' : ''" />
+                {{ feedbackSubmitting && feedbackType === 'helpful' ? '提交中...' : '有帮助' }}
               </button>
               <button
-                @click="handleFeedbackClick('negative')"
+                @click="handleFeedbackClick('unhelpful')"
                 :disabled="feedbackSubmitting"
-                class="flex-1 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
-                :class="feedbackType === 'negative' ? 'bg-red-50 border-red-500 text-red-600' : ''"
+                class="flex-1 py-2.5 border-2 rounded-lg transition-all flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed font-medium"
+                :class="isUnhelpfulActive
+                  ? 'bg-red-50 border-red-500 text-red-700 shadow-sm'
+                  : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'"
               >
-                <ThumbsDownIcon class="w-4 h-4" />
-                {{ feedbackSubmitting && feedbackType === 'negative' && !feedbackReason ? '提交中...' : '需改进' }}
+                <ThumbsDownIcon class="w-4 h-4" :class="isUnhelpfulActive ? 'text-red-600' : ''" />
+                需改进
               </button>
             </div>
-            <div v-if="feedbackType === 'negative'" class="mt-4">
+            <div v-if="showNegativeFeedbackForm" class="mt-4">
               <textarea
                 v-model="feedbackReason"
                 placeholder="请告诉我们哪里需要改进..."
@@ -789,7 +1223,12 @@ onUnmounted(() => {
           <span class="text-lg">💬</span>
           <h2 class="text-lg font-semibold text-slate-900">追问助手</h2>
         </div>
-        <p class="text-xs text-slate-500 mb-4">基于诊断结果继续提问，会经过合规审核</p>
+        <p class="text-xs text-slate-500 mb-4">
+          基于诊断结果继续提问，会经过合规审核
+          <span v-if="selectedFollowUpAsset" class="text-indigo-600">
+            · 当前选中：{{ selectedFollowUpAsset.name }}
+          </span>
+        </p>
 
         <div
           v-if="isLoading || !diagnosisData"
@@ -802,7 +1241,10 @@ onUnmounted(() => {
           {{ isLoading ? '诊断结果加载中，完成后即可追问…' : '诊断数据不可用，请刷新页面或重新导入持仓' }}
         </div>
 
-        <div class="flex flex-wrap gap-2 mb-3">
+        <div
+          class="flex flex-wrap gap-2 mb-3"
+          :class="{ 'pointer-events-none opacity-60': followUpLoading }"
+        >
           <button
             v-for="q in followUpSuggestions"
             :key="q"
@@ -818,11 +1260,14 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <div class="flex gap-2">
+        <div
+          class="flex gap-2"
+          :class="{ 'pointer-events-none opacity-60': followUpLoading }"
+        >
           <input
             v-model="followUpQuestion"
             type="text"
-            placeholder="输入追问，如：当前估值合理吗？"
+            :placeholder="followUpPlaceholder"
             class="flex-1 px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-50"
             :disabled="followUpLoading || !diagnosisData"
             @keydown="onFollowUpKeydown"

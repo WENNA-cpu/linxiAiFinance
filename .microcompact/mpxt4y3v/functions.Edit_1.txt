@@ -1,0 +1,69 @@
+The file /home/project/src/views/Traceability.vue has been updated. Made 1 replacement.
+
+Here's the result of running `cat -n` on a snippet of the edited file:
+ 268→    rule_checks: ['禁止词汇过滤', '异常数据拦截', '数值校验'],
+ 269→  };
+ 270→};
+ 271→
+ 272→// 获取血缘数据
+ 273→const fetchLineageData = async () => {
+ 274→  if (!requestId.value) return;
+ 275→
+ 276→  isLineageLoading.value = true;
+ 277→
+ 278→  try {
+ 279→    // 尝试从后端获取血缘数据
+ 280→    const response = await fetch(`/api/trace/${requestId.value}/lineage`);
+ 281→    if (response.ok) {
+ 282→      const data = await response.json();
+ 283→      lineageData.value = data;
+ 284→      isLineageLoading.value = false;
+ 285→      return;
+ 286→    }
+ 287→  } catch (err) {
+ 288→    console.log('[Trace] 血缘数据接口调用失败，使用 Mock 数据:', err);
+ 289→  }
+ 290→
+ 291→  // 使用 Mock 数据
+ 292→  lineageData.value = {
+ 293→    nodes: [
+ 294→      { name: 'Tushare行情数据', category: '数据源' },
+ 295→      { name: 'Tushare估值数据', category: '数据源' },
+ 296→      { name: 'Tushare舆情数据', category: '数据源' },
+ 297→      { name: '数据清洗', category: '处理' },
+ 298→      { name: 'LSTM模型', category: '模型' },
+ 299→      { name: '随机森林', category: '模型' },
+ 300→      { name: '情绪分析', category: '模型' },
+ 301→      { name: '周期判定', category: '输出' },
+ 302→      { name: '风险评级', category: '输出' },
+ 303→      { name: 'AI分析结论', category: '输出' }
+ 304→    ],
+ 305→    links: [
+ 306→      { source: 'Tushare行情数据', target: '数据清洗' },
+ 307→      { source: 'Tushare估值数据', target: '数据清洗' },
+ 308→      { source: '数据清洗', target: 'LSTM模型' },
+ 309→      { source: '数据清洗', target: '随机森林' },
+ 310→      { source: 'Tushare舆情数据', target: '情绪分析' },
+ 311→      { source: 'LSTM模型', target: '周期判定' },
+ 312→      { source: '随机森林', target: '风险评级' },
+ 313→      { source: '情绪分析', target: 'AI分析结论' },
+ 314→      { source: '周期判定', target: 'AI分析结论' },
+ 315→      { source: '风险评级', target: 'AI分析结论' }
+ 316→    ]
+ 317→  };
+ 318→  isLineageLoading.value = false;
+ 319→};
+ 320→
+ 321→onMounted(() => {
+ 322→  fetchTraceData();
+ 323→  fetchLineageData();
+ 324→});
+ 325→</script>
+ 326→
+ 327→<template>
+ 328→  <div class="min-h-screen bg-slate-50">
+ 329→    <RiskBanner />
+
+<system-reminder>
+如果遇到项目问题， 去检查webpack.config.js文件，重点检查文件里兜底策略的exclude: .(js|jsx|ts|tsx|css|json|html)$/i中 是否忘记添加mjs类型。
+</system-reminder>

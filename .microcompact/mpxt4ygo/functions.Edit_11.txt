@@ -1,0 +1,13 @@
+The file /home/project/src/views/Traceability.vue has been updated. Made 1 replacement.
+
+Here's the result of running `cat -n` on a snippet of the edited file:
+  66→}
+  67→
+  68→const traceData = ref<TraceData | null>(null);
+  69→const lineageData = ref<LineageData | null>(null);
+  70→const isLineageLoading = ref(true);
+  71→
+  72→// 格式化时间
+  73→const formatTime = (isoString: string) => {
+  74→  if (!isoString) return '-';
+  75→  const date = new Date(isoString);

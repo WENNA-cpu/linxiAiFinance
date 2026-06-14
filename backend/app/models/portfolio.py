@@ -56,9 +56,9 @@ class AIOutputLog(Base):
 class UserFeedback(Base):
     __tablename__ = "user_feedbacks"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     feedback_id = Column(String, unique=True, index=True)
-    request_id = Column(String, index=True, nullable=True)
+    request_id = Column(String, index=True, nullable=True)  # 非唯一，同一诊断可有多条反馈
     output_id = Column(String, ForeignKey("ai_output_logs.output_id"), nullable=True)
     feedback_type = Column(String)  # positive, negative
     reason = Column(Text, nullable=True)

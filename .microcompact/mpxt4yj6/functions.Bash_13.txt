@@ -1,0 +1,5 @@
+{"exitCode":0,"output":"[OpenTelemetry] Trace 已启动，serviceName=oneday-sandbox-sdk-pro version=v0.1.0 env=production\n\n> lingxi-ai-advisor-frontend@1.0.0 typecheck /home/project\n> vue-tsc --noEmit\n\n[OpenTelemetry] Trace 已启动，serviceName=oneday-sandbox-sdk-pro version=v0.1.0 env=production\nsrc/views/Traceability.vue(558,35): error TS2322: Type '{ nodes: { name: string; category: string; }[]; links: { source: string; target: string; }[]; } | null' is not assignable to type 'LineageData | undefined'.\n  Type 'null' is not assignable to type 'LineageData | undefined'.\n ELIFECYCLE  Command failed with exit code 2."}
+
+<system-reminder>
+如果遇到项目问题， 去检查webpack.config.js文件，重点检查文件里兜底策略的exclude: .(js|jsx|ts|tsx|css|json|html)$/i中 是否忘记添加mjs类型。
+</system-reminder>

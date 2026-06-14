@@ -1,0 +1,26 @@
+[
+  {
+    "id": "1",
+    "content": "创建课程详情数据结构和内容",
+    "status": "completed",
+    "priority": "high"
+  },
+  {
+    "id": "2",
+    "content": "创建课程详情页面组件",
+    "status": "completed",
+    "priority": "high"
+  },
+  {
+    "id": "3",
+    "content": "添加路由和点击跳转",
+    "status": "completed",
+    "priority": "high"
+  },
+  {
+    "id": "4",
+    "content": "更新投教页支持点击学习",
+    "status": "completed",
+    "priority": "medium"
+  }
+]

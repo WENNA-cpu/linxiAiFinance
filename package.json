@@ -1,0 +1,29 @@
+{
+  "name": "lingxi-ai-advisor-frontend",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 3015 --host 0.0.0.0 --strictPort",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview --port 3015 --host 0.0.0.0",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.106.2",
+    "date-fns": "^2.30.0",
+    "echarts": "^5.4.3",
+    "pinia": "^2.1.7",
+    "vue": "^3.4.0",
+    "vue-router": "^4.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@vitejs/plugin-vue": "^5.0.0",
+    "autoprefixer": "^10.4.16",
+    "postcss": "^8.4.31",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.3.3",
+    "vite": "^5.2.0",
+    "vue-tsc": "^2.0.0"
+  }
+}

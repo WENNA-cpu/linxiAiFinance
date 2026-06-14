@@ -1,0 +1,44 @@
+The file /home/project/src/views/PortfolioDiagnosis.vue has been updated. Made 1 replacement.
+
+Here's the result of running `cat -n` on a snippet of the edited file:
+ 271→    },
+ 272→  };
+ 273→});
+ 274→
+ 275→const assetAnalysis = computed(() => {
+ 276→  const assets = portfolioStore.portfolio.assets;
+ 277→  if (assets.length === 0) {
+ 278→    return [];
+ 279→  }
+ 280→
+ 281→  // 优先使用后端返回的真实行情数据
+ 282→  const backendAssets = diagnosisData.value?.detail?.assets || [];
+ 283→  const backendAssetsMap = new Map(backendAssets.map((a: any) => [a.code, a]));
+ 284→
+ 285→  return assets.map(asset => {
+ 286→    const backendAsset = backendAssetsMap.get(asset.code);
+ 287→    // 优先使用后端返回的今日涨跌幅（来自Tushare）
+ 288→    const todayChangePct = backendAsset?.today_change_pct;
+ 289→    // 如果后端没有数据，则使用用户导入的成本价计算
+ 290→    const calculatedRate = asset.costPrice > 0
+ 291→      ? ((asset.currentPrice - asset.costPrice) / asset.costPrice) * 100
+ 292→      : 0;
+ 293→
+ 294→    return {
+ 295→      ...asset,
+ 296→      returnRate: todayChangePct !== undefined ? todayChangePct : calculatedRate,
+ 297→      dataSource: backendAsset?.data_source || '用户导入数据',
+ 298→      riskLevel: Math.random() > 0.5 ? 'high' : Math.random() > 0.5 ? 'medium' : 'low',
+ 299→      trend: (todayChangePct !== undefined ? todayChangePct : calculatedRate) >= 0 ? 'up' : 'down',
+ 300→    };
+ 301→  });
+ 302→});
+ 303→
+ 304→const submitFeedback = () => {
+ 305→  showFeedback.value = false;
+ 306→  feedbackType.value = null;
+ 307→  feedbackReason.value = '';
+
+<system-reminder>
+如果遇到项目问题， 去检查webpack.config.js文件，重点检查文件里兜底策略的exclude: .(js|jsx|ts|tsx|css|json|html)$/i中 是否忘记添加mjs类型。
+</system-reminder>

@@ -3,10 +3,13 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
+import json
 import random
 import os
 import asyncio
 import aiohttp
+import time
+from pathlib import Path
 
 from app.models.database import get_db
 from app.models.portfolio import AuditLog
@@ -20,91 +23,304 @@ router = APIRouter()
 
 # Tushare配置
 TUSHARE_TOKEN = os.getenv("TUSHARE_TOKEN", "").strip()
+_QUOTE_CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "cache" / "tushare" / "quotes"
+QUOTE_CACHE_TTL_SECONDS = 4 * 3600
 
 
-async def fetch_tushare_daily(ts_code: str) -> Optional[Dict[str, Any]]:
-    """从Tushare获取最新日线数据"""
+def _to_float(value: Any, default: float = 0.0) -> float:
     try:
-        async with aiohttp.ClientSession() as session:
-            # 获取最近一个交易日的数据
-            end_date = datetime.now().strftime("%Y%m%d")
-            start_date = (datetime.now() - timedelta(days=7)).strftime("%Y%m%d")
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
-            payload = {
-                "api_name": "daily",
-                "token": TUSHARE_TOKEN,
-                "params": {
-                    "ts_code": ts_code,
-                    "start_date": start_date,
-                    "end_date": end_date,
-                },
-            }
 
-            print(f"[Tushare] 请求 {ts_code} 数据, payload: {payload}")
+def _calc_today_change_pct(close: float, pre_close: float, pct_chg: Any = None) -> Optional[float]:
+    """今日涨跌幅 = (当前价 - 昨收) / 昨收 × 100%，优先用 Tushare pct_chg"""
+    if pct_chg is not None and str(pct_chg).strip() != "":
+        return round(_to_float(pct_chg), 2)
+    if close > 0 and pre_close > 0:
+        return round((close - pre_close) / pre_close * 100, 2)
+    return None
 
-            async with session.post("https://api.tushare.pro", json=payload) as response:
-                print(f"[Tushare] {ts_code} 响应状态: {response.status}")
-                if response.status == 200:
-                    result = await response.json()
-                    print(f"[Tushare] {ts_code} 响应: {result}")
-                    if result.get("code") == 0:
-                        data = result.get("data", {})
-                        if data and "items" in data and len(data["items"]) > 0:
-                            fields = data.get("fields", [])
-                            latest_item = data["items"][0]  # 最新数据
-                            result_dict = dict(zip(fields, latest_item))
-                            print(f"[Tushare] {ts_code} 成功获取数据: {result_dict}")
-                            return result_dict
-                        else:
-                            print(f"[Tushare] {ts_code} 无数据返回")
-                    else:
-                        print(f"[Tushare] {ts_code} API错误: {result.get('msg', '未知错误')}")
-                else:
-                    print(f"[Tushare] {ts_code} HTTP错误: {response.status}")
-    except Exception as e:
-        print(f"[Tushare] 获取 {ts_code} 数据失败: {e}")
-        import traceback
-        traceback.print_exc()
+
+def _daily_row_to_quote(ts_code: str, row: Dict[str, Any]) -> Dict[str, Any]:
+    close = _to_float(row.get("close"))
+    pre_close = _to_float(row.get("pre_close"))
+    pct_chg = _calc_today_change_pct(close, pre_close, row.get("pct_chg"))
+    return {
+        "ts_code": ts_code,
+        "trade_date": str(row.get("trade_date", "")),
+        "close": close,
+        "pre_close": pre_close,
+        "open": _to_float(row.get("open")),
+        "high": _to_float(row.get("high")),
+        "low": _to_float(row.get("low")),
+        "change": _to_float(row.get("change")),
+        "pct_chg": pct_chg,
+        "vol": _to_float(row.get("vol")),
+        "amount": _to_float(row.get("amount")),
+        "data_source": row.get("data_source"),
+    }
+
+
+async def fetch_tushare_daily(ts_code: str, lookback_days: int = 60, asset_type: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """从 DataService 获取最近一个交易日行情（股票 daily / 基金 fund_daily）"""
+    svc = DataService()
+    quote = await svc.get_current_price(ts_code, lookback_days=lookback_days, asset_type=asset_type)
+    if not quote:
+        return None
+    return quote
+
+
+async def fetch_quote_via_data_service(
+    ts_code: str,
+    lookback_days: int = 60,
+    asset_type: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """DataService 拉取更长区间，取最近交易日收盘价/净值"""
+    svc = DataService()
+    return await svc.get_current_price(ts_code, lookback_days=lookback_days, asset_type=asset_type)
+
+
+async def fetch_quote_for_asset(
+    code: str,
+    asset_type: Optional[str] = None,
+    *,
+    force_refresh: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """多级降级：Tushare fund_daily/daily -> 本地缓存 -> Mock（仅基金）"""
+    ts_code = DataService._normalize_ts_code(code)
+    svc = DataService()
+
+    quote = await svc.get_current_price(ts_code, lookback_days=60, asset_type=asset_type)
+    if quote and _to_float(quote.get("close")) > 0:
+        normalized = _daily_row_to_quote(ts_code, quote)
+        _save_cached_quote(code, normalized)
+        print(
+            f"[行情] {code} -> {ts_code} close={normalized['close']} "
+            f"trade_date={normalized.get('trade_date')} source={quote.get('data_source')}"
+        )
+        return normalized
+
+    if not force_refresh:
+        cached = _load_cached_quote(code)
+        if cached and _to_float(cached.get("close")) > 0:
+            latest_td = await svc._resolve_latest_trade_date(svc._cn_now())
+            cached_td = str(cached.get("trade_date", ""))
+            if cached_td and cached_td >= latest_td:
+                if cached.get("pct_chg") is None:
+                    cached["pct_chg"] = _calc_today_change_pct(
+                        _to_float(cached.get("close")),
+                        _to_float(cached.get("pre_close")),
+                    )
+                print(
+                    f"[行情] {code} 使用缓存 close={cached.get('close')} "
+                    f"trade_date={cached.get('trade_date')}"
+                )
+                return cached
+            print(
+                f"[行情] {code} 缓存过期 trade_date={cached_td} < latest={latest_td}，重新拉取"
+            )
+
+    if svc.is_fund_code(ts_code, asset_type):
+        mock = svc._mock_quote(ts_code)
+        if mock and _to_float(mock.get("close")) > 0:
+            normalized = _daily_row_to_quote(ts_code, mock)
+            _save_cached_quote(code, normalized)
+            print(f"[行情] {code} 使用 Mock 净值 close={normalized['close']}")
+            return normalized
+
+    print(f"[行情] {code} 无法获取有效收盘价")
+    return None
+
+
+def _quote_lookup_key(code: str) -> str:
+    return DataService._normalize_ts_code(code).split(".")[0]
+
+
+def _get_asset_quote(asset_quotes: Dict[str, Any], code: str) -> Optional[Dict[str, Any]]:
+    """按多种 code 形式查找行情"""
+    keys = {code, _quote_lookup_key(code), DataService._normalize_ts_code(code)}
+    for key in keys:
+        if key in asset_quotes and asset_quotes[key]:
+            return asset_quotes[key]
     return None
 
 
 async def fetch_stock_quote(ts_code: str) -> Optional[Dict[str, Any]]:
-    """获取股票行情（涨跌幅等）"""
-    daily_data = await fetch_tushare_daily(ts_code)
-    if daily_data:
-        return {
-            "ts_code": ts_code,
-            "trade_date": daily_data.get("trade_date", ""),
-            "close": daily_data.get("close", 0),
-            "open": daily_data.get("open", 0),
-            "high": daily_data.get("high", 0),
-            "low": daily_data.get("low", 0),
-            "pre_close": daily_data.get("pre_close", 0),
-            "change": daily_data.get("change", 0),
-            "pct_chg": daily_data.get("pct_chg", 0),
-            "vol": daily_data.get("vol", 0),
-            "amount": daily_data.get("amount", 0),
-        }
-    return None
+    """兼容旧调用：按 ts_code 获取行情"""
+    code = ts_code.split(".")[0] if "." in ts_code else ts_code
+    return await fetch_quote_for_asset(code)
 
 
 def _normalize_ts_code(code: str) -> str:
-    if "." in code:
-        return code
-    return f"{code}.SH" if code.startswith("6") else f"{code}.SZ"
+    return DataService._normalize_ts_code(code)
 
 
-async def fetch_asset_history(ts_code: str, days: int = 365) -> List[Dict[str, Any]]:
-    """获取资产历史日线+估值用于 RF/LSTM"""
+def _quote_cache_path(code: str) -> Path:
+    safe = _normalize_ts_code(code).replace(".", "_")
+    return _QUOTE_CACHE_DIR / f"daily_{safe}.json"
+
+
+def _load_cached_quote(code: str) -> Optional[Dict[str, Any]]:
+    path = _quote_cache_path(code)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        cached_at = payload.get("ts", 0)
+        if time.time() - cached_at > QUOTE_CACHE_TTL_SECONDS:
+            return None
+        return payload.get("quote")
+    except Exception:
+        return None
+
+
+def _save_cached_quote(code: str, quote: Dict[str, Any]) -> None:
+    try:
+        _QUOTE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _quote_cache_path(code).write_text(
+            json.dumps({"ts": datetime.now().timestamp(), "quote": quote}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        print(f"[诊断] 行情缓存写入失败 {code}: {e}")
+
+
+def _resolve_asset_quote(
+    asset_code: str,
+    live_quote: Optional[Dict[str, Any]],
+    asset_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    """解析行情：Tushare/缓存/Mock，不使用用户导入模拟价"""
+    if live_quote and _to_float(live_quote.get("close")) > 0:
+        close = _to_float(live_quote.get("close"))
+        pre_close = _to_float(live_quote.get("pre_close"))
+        pct_chg = _calc_today_change_pct(close, pre_close, live_quote.get("pct_chg"))
+        quote = {
+            **live_quote,
+            "close": close,
+            "pre_close": pre_close,
+            "pct_chg": pct_chg,
+        }
+        _save_cached_quote(asset_code, quote)
+        return {
+            "close": close,
+            "pre_close": pre_close,
+            "pct_chg": pct_chg,
+            "trade_date": str(live_quote.get("trade_date", "")),
+            "data_source": (
+                "Mock净值" if live_quote.get("data_source") == "mock"
+                else (live_quote.get("data_source") or "Tushare行情")
+            ),
+            "price_status": "live" if live_quote.get("data_source") != "mock" else "cached",
+        }
+
+    cached = _load_cached_quote(asset_code)
+    if cached and _to_float(cached.get("close")) > 0:
+        close = _to_float(cached.get("close"))
+        pre_close = _to_float(cached.get("pre_close"))
+        pct_chg = _calc_today_change_pct(close, pre_close, cached.get("pct_chg"))
+        return {
+            "close": close,
+            "pre_close": pre_close,
+            "pct_chg": pct_chg,
+            "trade_date": str(cached.get("trade_date", "")),
+            "data_source": "最近交易日缓存",
+            "price_status": "cached",
+        }
+
     svc = DataService()
+    ts_code = svc._normalize_ts_code(asset_code)
+    mock = svc._mock_quote(ts_code)
+    if mock and _to_float(mock.get("close")) > 0:
+        close = _to_float(mock.get("close"))
+        pre_close = _to_float(mock.get("pre_close"))
+        pct_chg = _calc_today_change_pct(close, pre_close, mock.get("pct_chg"))
+        normalized = {**mock, "close": close, "pre_close": pre_close, "pct_chg": pct_chg}
+        _save_cached_quote(asset_code, normalized)
+        return {
+            "close": close,
+            "pre_close": pre_close,
+            "pct_chg": pct_chg,
+            "trade_date": str(mock.get("trade_date", "")),
+            "data_source": "Mock净值",
+            "price_status": "cached",
+        }
+
+    return {
+        "close": None,
+        "pre_close": None,
+        "pct_chg": None,
+        "trade_date": "",
+        "data_source": "数据更新中",
+        "price_status": "pending",
+    }
+
+
+def _asset_quantity(asset: "AssetInput") -> float:
+    return float(asset.quantity or 0)
+
+
+def _build_asset_metrics(asset: "AssetInput", quote_info: Dict[str, Any]) -> Dict[str, Any]:
+    qty = _asset_quantity(asset)
+    cost_price = _to_float(asset.cost_price)
+    current_price = quote_info.get("close")
+    has_price = current_price is not None and _to_float(current_price) > 0
+    close_val = _to_float(current_price) if has_price else None
+
+    position_cost = round(cost_price * qty, 2)
+    market_value = round(close_val * qty, 2) if has_price and close_val is not None else None
+    profit_amount = round(market_value - position_cost, 2) if market_value is not None else None
+    profit_pct = (
+        round((close_val - cost_price) / cost_price * 100, 2)
+        if has_price and cost_price > 0 and close_val is not None
+        else None
+    )
+    today_change = quote_info.get("pct_chg")
+
+    return {
+        "code": asset.code,
+        "name": asset.name,
+        "weight": asset.weight,
+        "asset_type": asset.asset_type or "stock",
+        "quantity": qty,
+        "cost_price": round(cost_price, 2),
+        "current_price": round(close_val, 2) if close_val is not None else None,
+        "position_cost": position_cost,
+        "market_value": market_value,
+        "profit_amount": profit_amount,
+        "profit_pct": profit_pct,
+        "today_change_pct": today_change,
+        "trade_date": quote_info.get("trade_date", ""),
+        "data_source": quote_info.get("data_source", ""),
+        "price_status": quote_info.get("price_status", "pending"),
+    }
+
+
+async def fetch_asset_history(
+    ts_code: str,
+    days: int = 365,
+    asset_type: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """获取资产历史日线/净值；基金用 fund_daily，无 PE/PB 时用净值走势"""
+    svc = DataService()
+    ts_code = svc._normalize_ts_code(ts_code)
     end = datetime.now()
     start = end - timedelta(days=days)
     sd, ed = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
-    daily = await svc.fetch_daily_data(ts_code, sd, ed) or []
+    daily = await svc.fetch_ohlcv_data(ts_code, sd, ed, asset_type=asset_type) or []
+    daily = sorted(daily, key=lambda x: x.get("trade_date", ""))
+
+    if svc.is_fund_code(ts_code, asset_type):
+        return daily
+
     basic = await svc.fetch_daily_basic_historical(ts_code, sd, ed) or []
     basic_map = {b.get("trade_date"): b for b in basic}
     rows = []
-    for d in sorted(daily, key=lambda x: x.get("trade_date", "")):
+    for d in daily:
         td = d.get("trade_date")
         merged = dict(d)
         if td in basic_map:
@@ -113,15 +329,18 @@ async def fetch_asset_history(ts_code: str, days: int = 365) -> List[Dict[str, A
     return rows
 
 
-async def _fetch_quotes_parallel(assets: List, timeout: float = 12.0) -> Dict[str, Any]:
-    """并行拉取行情，超时后回退到用户导入价格"""
+async def _fetch_quotes_parallel(assets: List, timeout: float = 20.0) -> Dict[str, Any]:
+    """并行拉取行情（Tushare + DataService 降级 + 缓存）"""
 
     async def _one(asset) -> tuple:
-        ts_code = _normalize_ts_code(asset.code)
         try:
-            quote = await asyncio.wait_for(fetch_stock_quote(ts_code), timeout=4.0)
+            quote = await asyncio.wait_for(
+                fetch_quote_for_asset(asset.code, asset_type=asset.asset_type, force_refresh=True),
+                timeout=10.0,
+            )
             return asset.code, quote
-        except Exception:
+        except Exception as e:
+            print(f"[诊断] 行情拉取失败 {asset.code}: {e}")
             return asset.code, None
 
     pairs: List[tuple] = []
@@ -131,9 +350,15 @@ async def _fetch_quotes_parallel(assets: List, timeout: float = 12.0) -> Dict[st
             timeout=timeout,
         )
     except asyncio.TimeoutError:
-        print("[诊断] 行情拉取超时，使用用户导入价格")
+        print("[诊断] 行情批量拉取超时，将使用缓存或 Mock")
 
-    return {code: quote for code, quote in pairs if quote}
+    result: Dict[str, Any] = {}
+    for code, quote in pairs:
+        if not quote:
+            continue
+        result[code] = quote
+        result[_quote_lookup_key(code)] = quote
+    return result
 
 
 async def _run_lstm_trend_light(assets: List, asset_quotes: dict, request_id: str) -> Dict[str, Any]:
@@ -186,7 +411,9 @@ async def _run_lstm_trend(assets: List, asset_quotes: dict, request_id: str) -> 
     forecasts = []
     for asset in assets[:10]:
         ts_code = _normalize_ts_code(asset.code)
-        history = await fetch_asset_history(ts_code, days=320)
+        history = await fetch_asset_history(
+            ts_code, days=320, asset_type=getattr(asset, "asset_type", None),
+        )
         closes = [float(r["close"]) for r in history if r.get("close")]
         if len(closes) < 30:
             continue
@@ -208,7 +435,9 @@ async def _run_rf_risk(assets: List) -> Dict[str, Any]:
     histories = []
     for asset in assets:
         ts_code = _normalize_ts_code(asset.code)
-        history = await fetch_asset_history(ts_code, days=180)
+        history = await fetch_asset_history(
+            ts_code, days=180, asset_type=getattr(asset, "asset_type", None),
+        )
         if len(history) >= 30:
             histories.append({"code": asset.code, "name": asset.name, "history": history})
     return predictor.assess_portfolio(histories)
@@ -265,12 +494,70 @@ class AssetInput(BaseModel):
     weight: float
     cost_price: Optional[float] = None
     current_price: Optional[float] = None
+    quantity: Optional[float] = None
+    asset_type: Optional[str] = "stock"
 
 
 class PortfolioInput(BaseModel):
     assets: List[AssetInput]
     total_value: Optional[float] = None
     leverage: float = 1.0
+
+
+class QuoteRefreshAsset(BaseModel):
+    code: str
+    name: str = ""
+    quantity: Optional[float] = 0
+    cost_price: Optional[float] = 0
+    asset_type: Optional[str] = "stock"
+
+
+class QuoteRefreshInput(BaseModel):
+    assets: List[QuoteRefreshAsset] = []
+
+
+@router.post("/refresh-quotes")
+async def refresh_portfolio_quotes(data: QuoteRefreshInput, db: Session = Depends(get_db)):
+    """刷新持仓最新收盘价/净值，供诊断页与情绪纠偏页同步现价"""
+    if not data.assets:
+        return {"assets": [], "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+    refreshed: List[Dict[str, Any]] = []
+    for asset in data.assets:
+        quote = await fetch_quote_for_asset(
+            asset.code,
+            asset_type=asset.asset_type,
+            force_refresh=True,
+        )
+        quote_info = _resolve_asset_quote(asset.code, quote, asset_type=asset.asset_type)
+        qty = float(asset.quantity or 0)
+        cost = _to_float(asset.cost_price)
+        close_val = quote_info.get("close")
+        has_price = close_val is not None and _to_float(close_val) > 0
+        current_price = round(_to_float(close_val), 2) if has_price else None
+        market_value = round(current_price * qty, 2) if has_price and current_price is not None else None
+
+        row = {
+            "code": asset.code,
+            "name": asset.name,
+            "current_price": current_price,
+            "market_value": market_value,
+            "cost_price": round(cost, 2) if cost > 0 else None,
+            "trade_date": quote_info.get("trade_date", ""),
+            "data_source": quote_info.get("data_source", ""),
+            "price_status": quote_info.get("price_status", "pending"),
+            "today_change_pct": quote_info.get("pct_chg"),
+        }
+        refreshed.append(row)
+        print(
+            f"[刷新现价] {asset.code} {asset.name} current_price={current_price} "
+            f"trade_date={row['trade_date']} source={row['data_source']}"
+        )
+
+    return {
+        "assets": refreshed,
+        "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
 
 class RiskAssessmentInput(BaseModel):
@@ -369,67 +656,65 @@ async def diagnose_portfolio(data: PortfolioInput, db: Session = Depends(get_db)
         }
 
     step_start = datetime.utcnow()
-    # 若用户已提供成本价/现价，优先使用本地数据，避免阻塞
-    has_local_prices = all(
-        a.cost_price and a.current_price for a in assets
+    # 有成本价即走快速诊断，避免 LSTM/RF 拖慢导致前端超时
+    has_local_prices = all((a.cost_price or 0) > 0 for a in assets)
+    asset_quotes = await _fetch_quotes_parallel(assets)
+    record_audit_step(
+        db, request_id, "数据获取",
+        f"共{total_assets}只资产，行情命中 {len(asset_quotes)} 只",
+        audit_logs, started_at=step_start,
     )
-    if has_local_prices:
-        asset_quotes = {}
-        record_audit_step(
-            db, request_id, "数据获取",
-            f"共{total_assets}只资产（使用用户导入价格，跳过行情拉取）",
-            audit_logs, started_at=step_start,
-        )
-    else:
-        asset_quotes = await _fetch_quotes_parallel(assets)
-        record_audit_step(
-            db, request_id, "数据获取",
-            f"共{total_assets}只资产，行情命中 {len(asset_quotes)} 只",
-            audit_logs, started_at=step_start,
-        )
 
     step_start = datetime.utcnow()
-    total_cost = sum(a.cost_price * 100 for a in assets if a.cost_price)
-    total_current = sum(a.current_price * 100 for a in assets if a.current_price)
-    total_change_pct = ((total_current - total_cost) / total_cost * 100) if total_cost > 0 else 0
+    assets_metrics: List[Dict[str, Any]] = []
+    for asset in assets:
+        quote = _get_asset_quote(asset_quotes, asset.code)
+        if not quote:
+            quote = await fetch_quote_for_asset(asset.code, asset_type=asset.asset_type)
+        quote_info = _resolve_asset_quote(asset.code, quote, asset_type=asset.asset_type)
+        metrics = _build_asset_metrics(asset, quote_info)
+        assets_metrics.append(metrics)
+        print(
+            f"[诊断] {metrics['code']} {metrics['name']} "
+            f"current_price={metrics['current_price']} "
+            f"trade_date={metrics.get('trade_date')} "
+            f"source={metrics.get('data_source')}"
+        )
+
+    total_cost = sum(m["position_cost"] or 0 for m in assets_metrics)
+    total_current = sum(m["market_value"] or 0 for m in assets_metrics if m["market_value"] is not None)
+    total_profit = round(total_current - total_cost, 2)
+    total_change_pct = (total_profit / total_cost * 100) if total_cost > 0 else 0
 
     risk_assets = []
     opportunity_assets = []
     sector_performance = {}
 
-    for asset in assets:
-        # 优先使用Tushare的今日涨跌幅
-        quote = asset_quotes.get(asset.code)
-        if quote and quote.get('pct_chg') is not None:
-            today_change_pct = quote['pct_chg']
-        elif asset.cost_price and asset.current_price:
-            today_change_pct = (asset.current_price - asset.cost_price) / asset.cost_price * 100
-        else:
-            today_change_pct = 0
+    for metrics in assets_metrics:
+        profit_pct = metrics.get("profit_pct")
+        today_change_pct = metrics.get("today_change_pct")
 
-        # 亏损超过5%视为风险资产
-        if today_change_pct < -5:
+        if profit_pct is not None and profit_pct < -5:
             risk_assets.append({
-                "code": asset.code,
-                "name": asset.name,
-                "change_pct": round(today_change_pct, 2),
+                "code": metrics["code"],
+                "name": metrics["name"],
+                "change_pct": profit_pct,
+                "profit_pct": profit_pct,
                 "today_change": today_change_pct,
             })
 
-        # 盈利超过5%视为机会资产
-        if today_change_pct > 5:
+        if profit_pct is not None and profit_pct > 5:
             opportunity_assets.append({
-                "code": asset.code,
-                "name": asset.name,
-                "change_pct": round(today_change_pct, 2),
+                "code": metrics["code"],
+                "name": metrics["name"],
+                "change_pct": profit_pct,
+                "profit_pct": profit_pct,
                 "today_change": today_change_pct,
             })
 
-        # 按板块统计
-        sector = _get_sector(asset.code)
-        if sector not in sector_performance:
-            sector_performance[sector] = []
-        sector_performance[sector].append(today_change_pct)
+        if today_change_pct is not None:
+            sector = _get_sector(metrics["code"])
+            sector_performance.setdefault(sector, []).append(today_change_pct)
 
     record_audit_step(
         db, request_id, "数据清洗", "完成缺失值处理", audit_logs, started_at=step_start,
@@ -467,16 +752,15 @@ async def diagnose_portfolio(data: PortfolioInput, db: Session = Depends(get_db)
     if has_local_prices:
         rule_high = 0
         predictions = []
-        for asset in assets:
-            if asset.cost_price and asset.current_price:
-                pct = (asset.current_price - asset.cost_price) / asset.cost_price * 100
-                if pct < -5:
-                    rule_high += 1
-                    predictions.append({
-                        "code": asset.code,
-                        "name": asset.name,
-                        "risk_level": "高风险",
-                    })
+        for metrics in assets_metrics:
+            profit_pct = metrics.get("profit_pct")
+            if profit_pct is not None and profit_pct < -5:
+                rule_high += 1
+                predictions.append({
+                    "code": metrics["code"],
+                    "name": metrics["name"],
+                    "risk_level": "高风险",
+                })
         rf_result = {
             "model_available": False,
             "high_risk_count": rule_high,
@@ -563,42 +847,8 @@ async def diagnose_portfolio(data: PortfolioInput, db: Session = Depends(get_db)
     if not opportunities:
         opportunities.append("建议关注低估值优质资产的配置机会")
 
-    # 构建资产详情（基于用户成本价计算真实盈亏）
-    assets_detail = []
-    for asset in assets:
-        quote = asset_quotes.get(asset.code)
-
-        # 从Tushare获取当前价格（收盘价）
-        if quote and quote.get('close'):
-            current_price = quote['close']
-            trade_date = quote.get('trade_date', '')
-            data_source = "Tushare实时行情"
-        elif asset.current_price:
-            # 使用用户导入的当前价格
-            current_price = asset.current_price
-            trade_date = ""
-            data_source = "用户导入数据"
-        else:
-            current_price = 0
-            trade_date = ""
-            data_source = "暂无数据"
-
-        # 计算基于成本价的盈亏百分比
-        if asset.cost_price and asset.cost_price > 0 and current_price > 0:
-            profit_pct = (current_price - asset.cost_price) / asset.cost_price * 100
-        else:
-            profit_pct = 0
-
-        assets_detail.append({
-            "code": asset.code,
-            "name": asset.name,
-            "weight": asset.weight,
-            "cost_price": asset.cost_price,
-            "current_price": current_price,
-            "profit_pct": round(profit_pct, 2),  # 基于成本价的盈亏百分比
-            "trade_date": trade_date,  # 数据日期
-            "data_source": data_source,
-        })
+    # 资产详情（含成本、市值、盈亏）
+    assets_detail = assets_metrics
 
     record_audit_step(
         db, request_id, "结果生成", "诊断报告生成完毕", audit_logs,
@@ -630,6 +880,9 @@ async def diagnose_portfolio(data: PortfolioInput, db: Session = Depends(get_db)
             "update_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
         },
         "detail": {
+            "total_cost": round(total_cost, 2),
+            "total_market_value": round(total_current, 2),
+            "total_profit_amount": total_profit,
             "total_change_pct": round(total_change_pct, 2),
             "risk_assets_detail": risk_assets,
             "opportunity_assets_detail": opportunity_assets,
