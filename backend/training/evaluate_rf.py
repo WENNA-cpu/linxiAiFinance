@@ -14,12 +14,12 @@ BACKEND = Path(__file__).resolve().parents[1]
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-from training.config import RF_EVAL_REPORT, RF_MODEL_PATH, STOCK_LIMIT, TRAIN_YEARS
+from training.config import RF_EVAL_REPORT, RF_FEATURE_NAMES, RF_MODEL_PATH, STOCK_LIMIT, TRAIN_YEARS_V2
 from training.data_fetch import prepare_training_data
-from training.train_rf import FEATURE_NAMES, LABEL_NAMES, engineer_features
+from training.train_rf import LABEL_NAMES, engineer_features
 
 
-def evaluate_rf(stock_limit: int = STOCK_LIMIT, years: int = TRAIN_YEARS) -> dict:
+def evaluate_rf(stock_limit: int = STOCK_LIMIT, years: int = TRAIN_YEARS_V2) -> dict:
     if not RF_MODEL_PATH.exists():
         raise FileNotFoundError(f"未找到模型 {RF_MODEL_PATH}，请先运行 train_rf.py")
 
@@ -33,7 +33,7 @@ def evaluate_rf(stock_limit: int = STOCK_LIMIT, years: int = TRAIN_YEARS) -> dic
         if not feat.empty:
             frames.append(feat)
     data = pd.concat(frames, ignore_index=True)
-    X = data[FEATURE_NAMES].astype(float).values
+    X = data[RF_FEATURE_NAMES].astype(float).values
     y = data["risk_label"].astype(int).values
 
     _, X_test, _, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
@@ -53,7 +53,7 @@ def evaluate_rf(stock_limit: int = STOCK_LIMIT, years: int = TRAIN_YEARS) -> dic
         "",
         "## 模型信息",
         f"- 模型路径: `{RF_MODEL_PATH}`",
-        f"- 特征: {', '.join(FEATURE_NAMES)}",
+        f"- 特征: {', '.join(RF_FEATURE_NAMES)}",
         f"- 测试样本: {len(X_test)}",
         "",
         "## 整体指标",

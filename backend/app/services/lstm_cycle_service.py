@@ -12,7 +12,9 @@ from app.config import LSTM_CYCLE_MODEL, LSTM_CYCLE_SCALER, LSTM_LEGACY_MODEL
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 LSTM_SEQ_LEN = 30
 LSTM_PRED_LEN = 5
-FEATURE_NAMES = ["close", "pct_chg", "vol", "pe_pct", "pb_pct"]
+FEATURE_NAMES = [
+    "close", "pct_chg", "vol", "pe_pct", "pb_pct", "turnover_rate", "amplitude",
+]
 
 
 class LSTMCyclePredictor:
@@ -91,14 +93,14 @@ class LSTMCyclePredictor:
         return self._format_result(close_prices, pred)
 
     def _predict_multifeature(self, history: List[Dict[str, Any]]) -> Dict[str, Any]:
-        from training.feature_engineering import build_feature_matrix
+        from training.feature_engineering import build_feature_matrix_v2
 
         if len(history) < LSTM_SEQ_LEN + 30:
             return {"error": f"需要至少 {LSTM_SEQ_LEN + 30} 天历史（含估值）", "available": False}
 
         df = pd.DataFrame(history)
         try:
-            matrix = build_feature_matrix(df)
+            matrix = build_feature_matrix_v2(df)
         except ValueError as e:
             return {"error": str(e), "available": False}
 

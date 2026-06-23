@@ -34,6 +34,28 @@ LSTM_PRED_LEN = 5
 LSTM_EPOCHS = int(os.getenv("LSTM_EPOCHS", "30"))
 LSTM_BATCH_SIZE = int(os.getenv("LSTM_BATCH_SIZE", "64"))
 
+LSTM_V2_MODEL_PATH = MODELS_DIR / "lstm_v2.0.h5"
+LSTM_V2_SCALER_PATH = MODELS_DIR / "lstm_v2.0_scaler.pkl"
+LSTM_V2_FEATURE_NAMES = [
+    "close", "pct_chg", "vol", "pe_pct", "pb_pct", "turnover_rate", "amplitude",
+]
+LSTM_V2_N_FEATURES = len(LSTM_V2_FEATURE_NAMES)
+LSTM_V2_LOSS_PLOT = REPORTS_DIR / "lstm_v2_loss_curve.png"
+LSTM_V2_EVAL_REPORT = REPORTS_DIR / "evaluation_lstm_v2.md"
+LSTM_V2_COMPARE_REPORT = REPORTS_DIR / "evaluation_lstm_v2_comparison.md"
+
+RF_V2_FEATURE_NAMES = [
+    "volatility", "turnover_rate", "pe_percentile", "pb_percentile",
+    "volume_change_rate", "amplitude",
+]
+
+# 生产随机森林特征（v2.1）
+RF_FEATURE_NAMES = RF_V2_FEATURE_NAMES + [
+    "rsi_14", "ma5_bias", "ma20_bias", "bollinger_width", "vol_ma5_ratio",
+]
+
+TRAIN_YEARS_V2 = int(os.getenv("TRAIN_YEARS_V2", "3"))
+
 RF_N_ESTIMATORS = int(os.getenv("RF_N_ESTIMATORS", "100"))
 RF_FORWARD_DAYS = 20  # 用于标签：未来 N 日收益率
 
