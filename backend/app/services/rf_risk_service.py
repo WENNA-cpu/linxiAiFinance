@@ -1,4 +1,4 @@
-"""随机森林风险评级推理服务（rf_risk.pkl v2.1）"""
+"""随机森林风险评级推理服务（rf_risk.pkl v2.2）"""
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -7,13 +7,14 @@ import numpy as np
 import pandas as pd
 
 from app.config import RF_RISK_MODEL
-from training.feature_engineering import add_technical_indicators
+from training.feature_engineering import add_rf_interaction_features, add_technical_indicators
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 FEATURE_NAMES = [
     "volatility", "turnover_rate", "pe_percentile", "pb_percentile",
     "volume_change_rate", "amplitude",
     "rsi_14", "ma5_bias", "ma20_bias", "bollinger_width", "vol_ma5_ratio",
+    "pe_vol_interaction", "pb_turnover_interaction", "amp_volchg_interaction",
 ]
 LABEL_NAMES = ["低风险", "中风险", "高风险"]
 
@@ -76,6 +77,16 @@ class RFRiskPredictor:
         if pd.isna(volatility):
             return None
 
+        feat_row = pd.DataFrame([{
+            "pe_percentile": pe_percentile,
+            "pb_percentile": pb_percentile,
+            "volatility": float(volatility),
+            "turnover_rate": float(turnover),
+            "volume_change_rate": float(volume_change_rate) if pd.notna(volume_change_rate) else 0.0,
+            "amplitude": amplitude,
+        }])
+        feat_row = add_rf_interaction_features(feat_row)
+
         names = self.bundle.get("feature_names", FEATURE_NAMES) if self.bundle else FEATURE_NAMES
         values = {
             "volatility": float(volatility),
@@ -89,6 +100,9 @@ class RFRiskPredictor:
             "ma20_bias": float(row.get("ma20_bias", 0.0)),
             "bollinger_width": float(row.get("bollinger_width", 0.0)),
             "vol_ma5_ratio": float(row.get("vol_ma5_ratio", 1.0)),
+            "pe_vol_interaction": float(feat_row["pe_vol_interaction"].iloc[0]),
+            "pb_turnover_interaction": float(feat_row["pb_turnover_interaction"].iloc[0]),
+            "amp_volchg_interaction": float(feat_row["amp_volchg_interaction"].iloc[0]),
         }
         return np.array([[values[n] for n in names]])
 
