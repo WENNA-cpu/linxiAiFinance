@@ -166,6 +166,25 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def add_rf_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
+    """RF 交互特征（基于 v2.1 已有列，不引入新数据源）"""
+    if df.empty:
+        return df
+
+    out = df.copy()
+    pe = pd.to_numeric(out.get("pe_percentile"), errors="coerce").fillna(0.5)
+    pb = pd.to_numeric(out.get("pb_percentile"), errors="coerce").fillna(0.5)
+    volat = pd.to_numeric(out.get("volatility"), errors="coerce").fillna(0.0)
+    turnover = pd.to_numeric(out.get("turnover_rate"), errors="coerce").fillna(1.0)
+    amplitude = pd.to_numeric(out.get("amplitude"), errors="coerce").fillna(0.0)
+    vol_chg = pd.to_numeric(out.get("volume_change_rate"), errors="coerce").fillna(0.0)
+
+    out["pe_vol_interaction"] = pe * volat
+    out["pb_turnover_interaction"] = pb * turnover
+    out["amp_volchg_interaction"] = amplitude * vol_chg
+    return out
+
+
 def build_feature_matrix_v2(group: pd.DataFrame, feature_names: list[str] | None = None) -> np.ndarray:
     """v2 LSTM 特征矩阵"""
     from training.config import LSTM_V2_FEATURE_NAMES

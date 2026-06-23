@@ -1,7 +1,6 @@
 """
-随机森林风险评级模型训练（v2.1）
-- 估值特征：波动率、换手率、PE/PB 分位、成交量变化率、振幅
-- 技术指标：RSI、MA 乖离、布林带宽度、量比
+随机森林风险评级模型训练（v2.2）
+- v2.1 基础特征 + 交互特征（PE×波动率、PB×换手率、振幅×成交量变化率）
 """
 import argparse
 import json
@@ -34,13 +33,18 @@ from training.config import (
     TRAIN_YEARS_V2,
 )
 from training.data_fetch import prepare_training_data
-from training.feature_engineering import add_technical_indicators
+from training.feature_engineering import add_rf_interaction_features, add_technical_indicators
 
 LABEL_NAMES = ["低风险", "中风险", "高风险"]
+RF_V22_FEATURE_NAMES = RF_FEATURE_NAMES + [
+    "pe_vol_interaction",
+    "pb_turnover_interaction",
+    "amp_volchg_interaction",
+]
 
 
 def engineer_features(group: pd.DataFrame, forward_days: int = RF_FORWARD_DAYS) -> pd.DataFrame:
-    """v2.1 随机森林特征工程"""
+    """v2.2 随机森林特征工程（含交互特征）"""
     g = add_technical_indicators(group.sort_values("trade_date").copy())
     g["close"] = pd.to_numeric(g["close"], errors="coerce")
     g["vol"] = pd.to_numeric(g["vol"], errors="coerce")
@@ -107,7 +111,10 @@ def engineer_features(group: pd.DataFrame, forward_days: int = RF_FORWARD_DAYS) 
     g["ma20_bias"] = g["ma20_bias"].fillna(0.0)
     g["bollinger_width"] = g["bollinger_width"].fillna(0.0)
     g["vol_ma5_ratio"] = g["vol_ma5_ratio"].fillna(1.0)
-    return g
+    g = add_rf_interaction_features(g)
+    for col in RF_V22_FEATURE_NAMES[-3:]:
+        g[col] = g[col].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return g.dropna(subset=RF_V22_FEATURE_NAMES)
 
 
 def train_rf(
@@ -128,17 +135,19 @@ def train_rf(
         raise RuntimeError("特征工程后无有效样本")
 
     data = pd.concat(frames, ignore_index=True)
-    X = data[RF_FEATURE_NAMES].astype(float).values
+    X = data[RF_V22_FEATURE_NAMES].astype(float).values
     y = data["risk_label"].astype(int).values
-    print(f"[RF v2.1] 总样本数: {len(X)}, 特征: {len(RF_FEATURE_NAMES)}")
+    print(f"[RF v2.2] 总样本数: {len(X)}, 特征: {len(RF_V22_FEATURE_NAMES)}")
 
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y,
     )
 
     model = RandomForestClassifier(
-        n_estimators=RF_N_ESTIMATORS,
-        max_depth=12,
+        n_estimators=200,
+        max_depth=20,
+        min_samples_split=2,
+        min_samples_leaf=1,
         random_state=42,
         n_jobs=-1,
     )
@@ -147,17 +156,17 @@ def train_rf(
     joblib.dump(
         {
             "model": model,
-            "feature_names": RF_FEATURE_NAMES,
+            "feature_names": RF_V22_FEATURE_NAMES,
             "label_names": LABEL_NAMES,
-            "version": "v2.1",
+            "version": "v2.2",
         },
         RF_MODEL_PATH,
     )
 
     importances = model.feature_importances_
     plt.figure(figsize=(10, 5))
-    plt.bar(RF_FEATURE_NAMES, importances, color="#6366f1")
-    plt.title("Random Forest v2.1 Feature Importance")
+    plt.bar(RF_V22_FEATURE_NAMES, importances, color="#6366f1")
+    plt.title("Random Forest v2.2 Feature Importance")
     plt.ylabel("Importance")
     plt.xticks(rotation=35, ha="right")
     plt.tight_layout()
@@ -176,17 +185,17 @@ def train_rf(
         "test_accuracy": test_acc,
         "recall_macro": recall_macro,
         "f1_macro": f1_macro,
-        "feature_importance": {n: float(v) for n, v in zip(RF_FEATURE_NAMES, importances)},
+        "feature_importance": {n: float(v) for n, v in zip(RF_V22_FEATURE_NAMES, importances)},
         "model_path": str(RF_MODEL_PATH),
         "importance_plot": str(RF_IMPORTANCE_PLOT),
-        "version": "v2.1",
+        "version": "v2.2",
     }
 
     meta_path = RF_MODEL_PATH.with_suffix(".meta.json")
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
 
-    report = f"""# 随机森林 v2.1 风险评级模型评估报告
+    report = f"""# 随机森林 v2.2 风险评级模型评估报告
 
 生成时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
@@ -200,8 +209,8 @@ def train_rf(
     RF_EVAL_REPORT.parent.mkdir(parents=True, exist_ok=True)
     RF_EVAL_REPORT.write_text(report, encoding="utf-8")
 
-    print(f"[RF v2.1] 模型已保存: {RF_MODEL_PATH}")
-    print(f"[RF v2.1] Accuracy={test_acc:.4f}, Recall={recall_macro:.4f}, F1={f1_macro:.4f}")
+    print(f"[RF v2.2] 模型已保存: {RF_MODEL_PATH}")
+    print(f"[RF v2.2] Accuracy={test_acc:.4f}, Recall={recall_macro:.4f}, F1={f1_macro:.4f}")
 
     try:
         from app.core import env_loader  # noqa: F401
@@ -212,13 +221,13 @@ def train_rf(
         )
         metrics["registered_version"] = version
     except Exception as e:
-        print(f"[RF v2.1] 版本注册跳过: {e}")
+        print(f"[RF v2.2] 版本注册跳过: {e}")
 
     return metrics
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="训练 RF v2.1")
+    parser = argparse.ArgumentParser(description="训练 RF v2.2")
     parser.add_argument("--limit", type=int, default=STOCK_LIMIT)
     parser.add_argument("--years", type=int, default=TRAIN_YEARS_V2)
     parser.add_argument("--refresh", action="store_true")
