@@ -20,7 +20,16 @@ _STOCK_NAME_RE = re.compile(
 )
 _STOCK_NAME_LOOSE_RE = re.compile(r"([^\s，,。.?？!！、；;]{2,8})(?:股|矿业|银行|科技|医药|能源|证券|基金|ETF)?")
 _SKIP_NAMES = frozenset(
-    {"我的", "这个", "那个", "这只", "那只", "整体", "持仓", "组合", "市场", "大盘", "风险", "诊断"}
+    {
+        "我的", "这个", "那个", "这只", "那只", "整体", "持仓", "组合", "市场", "大盘", "风险", "诊断",
+        "我的持仓", "我的资产", "我的股票", "我的组合", "我持有的", "持仓集中", "我的持仓集中",
+    }
+)
+
+# 查询用户自身持仓（非外部股票）
+_PORTFOLIO_OWN_INTENT_RE = re.compile(
+    r"我的持仓|我的资产|持仓集中|我持有的|我的股票|我的组合|整体持仓|持仓结构|"
+    r"持仓分散|是否集中|集中吗|集中不|分散吗|风险集中|行业集中"
 )
 
 _stock_basic_cache: list[dict[str, Any]] | None = None
@@ -85,6 +94,25 @@ def _asset_codes(asset: dict[str, Any]) -> set[str]:
     return codes
 
 
+def _is_portfolio_own_intent(question: str) -> bool:
+    """判断是否在查询用户自己的持仓（而非外部股票）"""
+    q = question.strip()
+    if not q:
+        return False
+    if _PORTFOLIO_OWN_INTENT_RE.search(q):
+        return True
+    # 「我的」+ 持仓/资产/组合/股票，且无明确外部代码 → 视为查自身持仓
+    if re.search(r"我的", q) and re.search(r"持仓|资产|组合|股票", q):
+        if not _CODE_RE.search(q):
+            return True
+    return False
+
+
+def _should_skip_external_extraction(question: str) -> bool:
+    """含持仓整体意图时，禁止将问句片段误判为外部股票名"""
+    return _is_portfolio_own_intent(question)
+
+
 def _portfolio_names_and_codes(assets: list[dict[str, Any]]) -> tuple[set[str], set[str]]:
     held_codes: set[str] = set()
     held_names: set[str] = set()
@@ -135,7 +163,17 @@ def _find_portfolio_match(question: str, assets: list[dict[str, Any]]) -> Option
     return None
 
 
+def _question_mentions_held_asset(question: str, held_names: set[str]) -> bool:
+    for held in held_names:
+        if held and held in question:
+            return True
+    return False
+
+
 def _extract_external_stock_hint(question: str, assets: list[dict[str, Any]]) -> Optional[dict[str, str]]:
+    if _should_skip_external_extraction(question):
+        return None
+
     held_names, held_codes = _portfolio_names_and_codes(assets)
 
     for match in _CODE_RE.finditer(question):
@@ -147,12 +185,17 @@ def _extract_external_stock_hint(question: str, assets: list[dict[str, Any]]) ->
     if name_match:
         name = name_match.group(1).strip()
         if name not in _SKIP_NAMES and not _name_in_portfolio(name, held_names):
-            return {"name": name}
+            if not (name.startswith("我的") and _question_mentions_held_asset(question, held_names)):
+                return {"name": name}
 
     loose_match = _STOCK_NAME_LOOSE_RE.search(question)
     if loose_match:
         name = loose_match.group(1).strip()
         if name not in _SKIP_NAMES and not _name_in_portfolio(name, held_names):
+            if re.match(r"^我的", name):
+                return None
+            if _question_mentions_held_asset(question, held_names) and re.search(r"我的", question):
+                return None
             return {"name": name}
 
     return None
@@ -163,6 +206,9 @@ async def _find_external_stock_in_question(
     assets: list[dict[str, Any]],
 ) -> Optional[tuple[str, str]]:
     """从 stock_basic 中扫描问题里提到的、且不在持仓中的标的"""
+    if _should_skip_external_extraction(question):
+        return None
+
     held_names, held_codes = _portfolio_names_and_codes(assets)
     stock_basic = await _get_stock_basic()
     if not stock_basic:
@@ -267,6 +313,36 @@ def build_prompt(
     """构建 DeepSeek 的 system / user Prompt"""
     q = question.strip()
 
+    if mode == "portfolio_own":
+        context_block = _format_diagnosis_context(diagnosis_context or {})
+        system_prompt = (
+            "你是「灵析 AI 智能投顾助手」的持仓诊断解读助手。"
+            "用户正在询问其【自身持仓】的整体情况，你必须且只能依据下方诊断上下文回答。"
+            "禁止将用户问题中的「我的持仓」等表述当作外部公司名称，禁止查询或编造未出现在上下文中的外部股票数据。"
+            "回答 150-300 字，条理清晰。"
+            "严禁给出买入、卖出、持有等具体操作建议，不得承诺收益或预测涨跌。"
+        )
+        user_prompt = (
+            f"用户问：{q}\n\n"
+            "请从诊断上下文中提取用户持仓信息回答，需覆盖：\n"
+            "- 持仓总资产数\n"
+            "- 各资产名称、盈亏\n"
+            "- 行业/类型分布（判断是否集中）\n"
+            "- 集中度结论（例如：「您的持仓集中在消费行业，占比 93%」）\n\n"
+            "不要查询外部股票数据。\n\n"
+            f"【诊断上下文】\n{context_block}\n\n"
+            "【参考示例，仅供理解回答风格】\n"
+            "示例1：\n"
+            "问：「我的持仓集中吗」\n"
+            "答：「您的持仓共 3 只资产。其中贵州茅台市值占比较高，"
+            "与平安银行、上证50ETF 相比更偏向单一标的集中；"
+            "从行业看若消费/白酒权重偏高，整体集中度较高，建议关注分散风险。」\n\n"
+            "示例2：\n"
+            "问：「紫金矿业怎么样」\n"
+            "答：（此为外部股票问题，不应在本模式下回答；应介绍紫金矿业主营业务与行业情况。）\n"
+        )
+        return system_prompt, user_prompt
+
     if mode == "external":
         display_code = _format_ts_code(stock_code) or stock_code or "未知"
         system_prompt = (
@@ -358,6 +434,7 @@ async def chat_with_diagnose(body: DiagnoseChatRequest, db: Session) -> Diagnose
             blocked_reason=result.blocked_reason,
             matched_word=result.matched_word,
             request_id=body.diagnosis_context.request_id,
+            source="diagnose_chat",
         )
         return DiagnoseChatResponse(
             blocked=True,
@@ -369,11 +446,17 @@ async def chat_with_diagnose(body: DiagnoseChatRequest, db: Session) -> Diagnose
     matched_asset = _find_portfolio_match(question, assets)
 
     try:
-        if matched_asset:
+        if matched_asset and not _is_portfolio_own_intent(question):
             system_prompt, user_prompt = build_prompt(
                 "portfolio",
                 question,
                 focus_asset=matched_asset,
+            )
+        elif _is_portfolio_own_intent(question):
+            system_prompt, user_prompt = build_prompt(
+                "portfolio_own",
+                question,
+                diagnosis_context=context,
             )
         else:
             external = await _find_external_stock_in_question(question, assets)

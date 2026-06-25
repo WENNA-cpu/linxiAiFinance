@@ -1,0 +1,22 @@
+{
+  "train_samples": 11040,
+  "test_samples": 2760,
+  "epochs_trained": 12,
+  "final_loss": 0.0005166662740521133,
+  "final_val_loss": 0.0001847044622991234,
+  "rmse": 3.3940993887654156,
+  "mae": 2.523157414178563,
+  "model_path": "E:\\linxiAiFinance\\backend\\models\\lstm_v2.0.h5",
+  "scaler_path": "E:\\linxiAiFinance\\backend\\models\\lstm_v2.0_scaler.pkl",
+  "features": [
+    "close",
+    "pct_chg",
+    "vol",
+    "pe_pct",
+    "pb_pct",
+    "turnover_rate",
+    "amplitude"
+  ],
+  "years": 3,
+  "data_source": "AKShare估值(优先) + Tushare日线"
+}

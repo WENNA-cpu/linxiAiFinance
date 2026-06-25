@@ -78,13 +78,13 @@ const FUND_MOCK_QUOTES: Record<string, { close: number; pct_chg: number; trade_d
 const isFundCode = (code: string, type?: string) =>
   type === 'fund' || type === 'etf' || /^(51|50|15|16|18)/.test(code.replace(/\.(SH|SZ)$/i, ''));
 
-const buildFallbackAssetDetail = (asset: { code: string; name: string; type: string; quantity: number; costPrice: number; marketValue: number }, totalValue: number) => {
+const buildFallbackAssetDetail = (asset: { code: string; name: string; type: string; quantity: number; costPrice: number; marketValue: number; currentPrice?: number }, totalValue: number) => {
   const qty = asset.quantity || 0;
   const costPrice = asset.costPrice || 0;
   const positionCost = costPrice * qty;
   const bareCode = asset.code.replace(/\.(SH|SZ)$/i, '');
   const mock = isFundCode(asset.code, asset.type) ? FUND_MOCK_QUOTES[bareCode] : undefined;
-  const storePrice = asset.currentPrice > 0 ? asset.currentPrice : null;
+  const storePrice = asset.currentPrice != null && asset.currentPrice > 0 ? asset.currentPrice : null;
   const currentPrice = mock?.close ?? storePrice;
   const marketValue = currentPrice !== null ? currentPrice * qty : null;
   const profitAmount = marketValue !== null ? marketValue - positionCost : null;
@@ -501,7 +501,7 @@ const patchDiagnosisQuotes = (rows: Array<{
     quoteMap.set(normalizeAssetCode(row.code), row);
   });
 
-  const assets = diagnosisData.value.detail.assets.map((ba) => {
+  const assets = diagnosisData.value.detail.assets.map((ba: BackendAsset) => {
     const quote = quoteMap.get(ba.code) ?? quoteMap.get(normalizeAssetCode(ba.code));
     if (!quote?.current_price) return ba;
     const qty = ba.quantity ?? 0;
@@ -754,10 +754,6 @@ const diagnosisContext = computed(() => {
 });
 
 const executeFollowUp = async (question: string) => {
-  followUpLoading.value = true;
-  followUpStatus.value = 'idle';
-  followUpBlockedReason.value = '';
-  followUpAnswer.value = '';
   followUpQuestion.value = question;
 
   try {
@@ -803,6 +799,10 @@ const sendFollowUp = (questionText?: string) => {
   if (isDuplicateFollowUp(question)) return;
 
   markFollowUpSubmitted(question);
+  followUpLoading.value = true;
+  followUpStatus.value = 'idle';
+  followUpBlockedReason.value = '';
+  followUpAnswer.value = '';
 
   if (followUpDebounceTimer) {
     clearTimeout(followUpDebounceTimer);
@@ -1250,7 +1250,7 @@ onUnmounted(() => {
             :key="q"
             type="button"
             :disabled="followUpLoading || !diagnosisData"
-            @click="sendFollowUp(q)"
+            @click.prevent="sendFollowUp(q)"
             class="text-xs px-3 py-1.5 rounded-full border transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             :class="q.includes('能买吗')
               ? 'border-red-200 text-red-600 bg-red-50 hover:bg-red-100'
@@ -1275,11 +1275,15 @@ onUnmounted(() => {
           <button
             type="button"
             :disabled="!followUpQuestion.trim() || followUpLoading || !diagnosisData"
-            @click="sendFollowUp()"
+            @click.prevent="sendFollowUp()"
             class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
           >
-            <ArrowRightIcon class="w-4 h-4" />
-            发送
+            <ArrowRightIcon v-if="!followUpLoading" class="w-4 h-4" />
+            <svg v-else class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+            </svg>
+            {{ followUpLoading ? '发送中...' : '发送' }}
           </button>
         </div>
 

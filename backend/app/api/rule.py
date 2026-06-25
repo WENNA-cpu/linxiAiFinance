@@ -35,6 +35,7 @@ async def check_rule(body: RuleCheckRequest, db: Session = Depends(get_db)):
             blocked_reason=result.blocked_reason,
             matched_word=result.matched_word,
             request_id=body.request_id,
+            source="rule_check",
         )
 
     return RuleCheckResponse(

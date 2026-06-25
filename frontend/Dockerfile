@@ -6,7 +6,8 @@ COPY package.json pnpm-lock.yaml* ./
 RUN npm install -g pnpm && pnpm install
 
 COPY . .
-RUN pnpm build
+# Docker 构建跳过 vue-tsc，加快部署（本地仍可用 pnpm build 做完整类型检查）
+RUN pnpm exec vite build
 
 FROM nginx:alpine
 

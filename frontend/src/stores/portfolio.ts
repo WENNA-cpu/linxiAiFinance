@@ -106,7 +106,7 @@ export const usePortfolioStore = defineStore('portfolio', () => {
     const assets = portfolio.value.assets.map((asset) => {
       const quote = quoteMap.get(asset.code) ?? quoteMap.get(normalizeAssetCode(asset.code));
       const currentPrice = quote?.current_price;
-      if (currentPrice == null || currentPrice <= 0) return asset;
+      if (!quote || currentPrice == null || currentPrice <= 0) return asset;
       updated = true;
       const marketValue = quote.market_value ?? asset.quantity * currentPrice;
       return {

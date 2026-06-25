@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
+from typing import Optional
 from pydantic import BaseModel, Field, ConfigDict
 
 from app.models.database import get_db
@@ -11,6 +12,8 @@ from app.services.model_manager import (
     rollback_model,
     update_runtime_version,
     get_active_version,
+    list_versions,
+    VERSION_ALIASES,
 )
 from app.services.lstm_cycle_service import reload_lstm_predictors
 from app.services.rf_risk_service import reload_rf_predictor
@@ -44,8 +47,10 @@ async def get_compliance_stats(db: Session = Depends(get_db)):
         compliance_blocked = db.query(ComplianceLog).filter(
             ComplianceLog.action == "blocked"
         ).count()
+        # 诊断流水线审计失败；排除已在 compliance_logs 中计数的问答拦截（历史数据兼容）
         audit_blocked = db.query(AuditLog).filter(
-            AuditLog.step_status.in_(["失败", "警告"])
+            AuditLog.step_status.in_(["失败", "警告"]),
+            AuditLog.step_name != "合规问答拦截",
         ).count()
         blocked_count = compliance_blocked + audit_blocked
         rule_logs = db.query(AuditLog).filter(AuditLog.step_name.contains("规则")).all()
@@ -154,7 +159,31 @@ class ModelRollbackRequest(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
     model_type: str = Field(..., description="lstm 或 rf")
-    target_version: str = Field(..., description="目标版本，如 v20260608_090710")
+    target_version: str = Field(
+        ...,
+        description="目标版本：语义别名 v1.0 / v2.0，或完整版本号如 v20260608_090710",
+    )
+
+
+@router.get("/model/versions")
+async def list_model_versions(model_type: Optional[str] = None):
+    """列出可回滚的模型版本及语义别名"""
+    try:
+        normalized = normalize_model_type(model_type) if model_type else None
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    versions = list_versions(normalized)
+    aliases = VERSION_ALIASES.get(normalized, {}) if normalized else VERSION_ALIASES
+    return {
+        "model_type": normalized,
+        "versions": versions,
+        "aliases": aliases,
+        "active": {
+            "lstm_cycle": get_active_version("lstm_cycle"),
+            "rf_risk": get_active_version("rf_risk"),
+        },
+    }
 
 
 @router.post("/model/rollback")

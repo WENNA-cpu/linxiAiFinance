@@ -1,8 +1,8 @@
 # 灵析 AI 智能投顾助手 — Interview Script & Highlights
 
 > 文件：`docs/interview-script-and-highlights.md`（原 `面试话术与亮点.md`）  
-> 演示链接：部署后填入公网 URL（见 [DEPLOY.md](../DEPLOY.md)）  
-> 本地演示：`http://localhost:3015`（前端）+ `http://localhost:8000/docs`（API）
+> 产品链接：部署后填入公网 URL（见 [DEPLOY.md](../DEPLOY.md)）  
+> 本地访问：`http://localhost:3015`（前端）+ `http://localhost:8000/docs`（API）
 
 ---
 
@@ -79,7 +79,7 @@ flowchart TB
 - **特征**：波动率、换手率、估值分位、成交量变化率
 - **标签**：未来 20 日收益分位数 → 低/中/高风险
 - **集成**：`POST /api/portfolio/diagnose` 逐步调用 RF，审计日志写入「识别出 X 个风险资产」
-- **兜底**：模型未加载时自动降级规则引擎，保证演示不挂
+- **兜底**：模型未加载时自动降级规则引擎，保证服务连续可用
 
 **话术**：「金融场景宁可降级也不能造假，所以做了 model_available 检测和规则 fallback。」
 
@@ -87,9 +87,9 @@ flowchart TB
 
 - **流程**：请求接收 → 数据获取 → 数据清洗 → LSTM → 随机森林 → 规则校验 → 结果生成
 - **存储**：每步写入 SQLite `audit_logs` 表
-- **展示**：`GET /api/trace/{request_id}` 按 `id` 排序返回 7 条；前端时间线 **100% 来自 API**，无 mock
+- **展示**：`GET /api/trace/{request_id}` 按 `id` 排序返回 7 条；前端时间线 **100% 来自 API 实时返回**
 
-**演示路径**：持仓诊断 → 点击「查看溯源」→ 展示 7 步完整链路 + 血缘图
+**推荐路径**：持仓诊断 → 点击「查看溯源」→ 展示 7 步完整链路 + 血缘图
 
 **话术**：「这是我在产品层面回应『AI 黑盒』问题的方案——每个结论都能追溯到具体步骤和当时的数据状态。」
 
@@ -134,7 +134,7 @@ flowchart TB
 
 ---
 
-## 六、推荐演示脚本（5 分钟）
+## 六、推荐产品介绍脚本（5 分钟）
 
 | 顺序 | 页面 | 讲什么 |
 |------|------|--------|
@@ -163,7 +163,7 @@ flowchart TB
 A：MVP 轻量部署，审计日志量级小；生产可换 `DATABASE_URL` 到 PG，SQLAlchemy 无需改业务代码。
 
 **Q：审计日志会不会被前端伪造？**  
-A：日志在后端诊断流程中逐步 `commit` 到 DB，前端只读 API，演示时可打开 `/docs` 展示接口。
+A：日志在后端诊断流程中逐步 `commit` 到 DB，前端只读 API，现场验证时可打开 `/docs` 查看接口。
 
 **Q：和 ChatGPT 包一层有什么区别？**  
 A：有 **领域模型**（LSTM/RF）、**真实行情**、**合规溯源**；LLM 只用于投教问答，不直接给买卖建议。

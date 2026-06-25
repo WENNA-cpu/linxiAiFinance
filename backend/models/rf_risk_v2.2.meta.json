@@ -1,0 +1,72 @@
+{
+  "version": "v2.2",
+  "features": [
+    "volatility",
+    "turnover_rate",
+    "pe_percentile",
+    "pb_percentile",
+    "volume_change_rate",
+    "amplitude",
+    "rsi_14",
+    "ma5_bias",
+    "ma20_bias",
+    "bollinger_width",
+    "vol_ma5_ratio",
+    "pe_vol_interaction",
+    "pb_turnover_interaction",
+    "amp_volchg_interaction"
+  ],
+  "interaction_features": [
+    "pe_vol_interaction",
+    "pb_turnover_interaction",
+    "amp_volchg_interaction"
+  ],
+  "best_params": {
+    "n_estimators": 200,
+    "max_depth": 20,
+    "min_samples_split": 2,
+    "min_samples_leaf": 1
+  },
+  "created_at": "2026-06-23T12:00:49.467224",
+  "train": {
+    "accuracy": 0.9995822890559732,
+    "recall": 0.9995850527977956,
+    "f1": 0.9995829582282187
+  },
+  "val": {
+    "accuracy": 0.6101364522417154,
+    "recall": 0.6106893812739287,
+    "f1": 0.6104062786015708
+  },
+  "test": {
+    "accuracy": 0.6116959064327485,
+    "recall": 0.6122665012510934,
+    "f1": 0.6119315438736086
+  },
+  "feature_importance_top5": [
+    {
+      "name": "pb_percentile",
+      "importance": 0.10866401671712955
+    },
+    {
+      "name": "pe_percentile",
+      "importance": 0.10170150461089839
+    },
+    {
+      "name": "pe_vol_interaction",
+      "importance": 0.08655162054763067
+    },
+    {
+      "name": "volatility",
+      "importance": 0.08039106570312197
+    },
+    {
+      "name": "bollinger_width",
+      "importance": 0.07825254918971758
+    }
+  ],
+  "interaction_in_top5": [
+    "pe_vol_interaction"
+  ],
+  "saved_version": "v2.2"
+}

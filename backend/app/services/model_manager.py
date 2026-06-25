@@ -124,11 +124,28 @@ def normalize_model_type(model_type: str) -> str:
     return MODEL_TYPE_ALIASES[key]
 
 
+# 语义化版本别名（便于运维/演示，映射到 metadata 中的真实版本号）
+VERSION_ALIASES: Dict[str, Dict[str, str]] = {
+    "lstm_cycle": {
+        "v1.0": "v20260605_192814",  # 首版五特征 LSTM
+        "v1.1": "v20260608_090710",
+        "v2.0": "v20260612_083932",  # 当前最优 RMSE 版本
+    },
+    "rf_risk": {
+        "v1.0": "v20260605_192852",
+    },
+}
+
+
 def resolve_target_version(model_type: str, target_version: str) -> str:
-    """精确或前缀匹配版本号（如 v20260608 或 v1.0 别名）"""
+    """精确、别名或前缀匹配版本号（如 v1.0 / v20260608）"""
     version = (target_version or "").strip()
     if not version:
         raise ValueError("target_version 不能为空")
+
+    alias = VERSION_ALIASES.get(model_type, {}).get(version)
+    if alias:
+        version = alias
 
     history = list_versions(model_type)
     if not history:

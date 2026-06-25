@@ -54,6 +54,14 @@ RF_FEATURE_NAMES = RF_V2_FEATURE_NAMES + [
     "rsi_14", "ma5_bias", "ma20_bias", "bollinger_width", "vol_ma5_ratio",
 ]
 
+RF_INTERACTION_FEATURE_NAMES = [
+    "pe_vol_interaction",
+    "pb_turnover_interaction",
+    "amp_volchg_interaction",
+]
+
+RF_SPRINT_FEATURE_NAMES = RF_FEATURE_NAMES + RF_INTERACTION_FEATURE_NAMES
+
 TRAIN_YEARS_V2 = int(os.getenv("TRAIN_YEARS_V2", "3"))
 
 RF_N_ESTIMATORS = int(os.getenv("RF_N_ESTIMATORS", "100"))

@@ -3,7 +3,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.models.portfolio import ComplianceLog, AuditLog
+from app.models.portfolio import ComplianceLog
 
 _DEDUP_WINDOW_SECONDS = 30
 
@@ -37,7 +37,7 @@ def record_compliance_event(
     request_id: Optional[str] = None,
     source: str = "diagnose_followup",
 ) -> ComplianceLog:
-    """写入 compliance_logs，拦截时同步记审计日志供合规统计"""
+    """写入 compliance_logs（问答拦截的唯一计数来源，避免与 audit_logs 重复统计）"""
     normalized = question.strip()
     existing = _find_recent_duplicate(
         db,
@@ -57,20 +57,6 @@ def record_compliance_event(
         source=source,
     )
     db.add(log)
-
-    if action == "blocked":
-        db.add(
-            AuditLog(
-                request_id=request_id or f"compliance_{int(datetime.utcnow().timestamp())}",
-                step_name="合规问答拦截",
-                step_status="失败",
-                step_detail=(
-                    f"来源={source}；命中词={matched_word or '-'}；"
-                    f"问题={normalized[:120]}；原因={blocked_reason or '违规内容'}"
-                ),
-            )
-        )
-
     db.commit()
     db.refresh(log)
     return log

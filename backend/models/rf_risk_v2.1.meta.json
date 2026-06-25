@@ -1,0 +1,36 @@
+{
+  "train_samples": 10944,
+  "test_samples": 2736,
+  "train_accuracy": 0.8233735380116959,
+  "test_accuracy": 0.569078947368421,
+  "recall_macro": 0.5696139761977418,
+  "f1_macro": 0.5672879516799662,
+  "feature_importance": {
+    "volatility": 0.10344934244915596,
+    "turnover_rate": 0.07845760923674058,
+    "pe_percentile": 0.17343066806189467,
+    "pb_percentile": 0.18083807355350917,
+    "volume_change_rate": 0.04767926385600282,
+    "amplitude": 0.05951979410399841,
+    "rsi_14": 0.07380911950343418,
+    "ma5_bias": 0.06512162256254336,
+    "ma20_bias": 0.07454507658424993,
+    "bollinger_width": 0.09286721138803167,
+    "vol_ma5_ratio": 0.05028221870043919
+  },
+  "model_path": "E:\\linxiAiFinance\\backend\\models\\rf_risk_v2.1.pkl",
+  "features": [
+    "volatility",
+    "turnover_rate",
+    "pe_percentile",
+    "pb_percentile",
+    "volume_change_rate",
+    "amplitude",
+    "rsi_14",
+    "ma5_bias",
+    "ma20_bias",
+    "bollinger_width",
+    "vol_ma5_ratio"
+  ],
+  "years": 3
+}

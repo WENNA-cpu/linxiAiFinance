@@ -18,6 +18,7 @@ from app.services.lstm_cycle_service import get_lstm_predictor
 from app.services.rf_risk_service import get_rf_predictor
 from app.services.model_manager import should_use_new_model
 from app.config import NEW_MODEL_RATIO
+from app.api.tushare_fallback import warn_tushare_mock, mock_quote_row
 
 router = APIRouter()
 
@@ -90,50 +91,57 @@ async def fetch_quote_for_asset(
     *,
     force_refresh: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    """多级降级：Tushare fund_daily/daily -> 本地缓存 -> Mock（仅基金）"""
+    """多级降级：Tushare fund_daily/daily -> 本地缓存 -> Mock"""
     ts_code = DataService._normalize_ts_code(code)
     svc = DataService()
 
-    quote = await svc.get_current_price(ts_code, lookback_days=60, asset_type=asset_type)
-    if quote and _to_float(quote.get("close")) > 0:
-        normalized = _daily_row_to_quote(ts_code, quote)
-        _save_cached_quote(code, normalized)
-        print(
-            f"[行情] {code} -> {ts_code} close={normalized['close']} "
-            f"trade_date={normalized.get('trade_date')} source={quote.get('data_source')}"
-        )
-        return normalized
+    try:
+        quote = await svc.get_current_price(ts_code, lookback_days=60, asset_type=asset_type)
+        if quote and _to_float(quote.get("close")) > 0:
+            normalized = _daily_row_to_quote(ts_code, quote)
+            _save_cached_quote(code, normalized)
+            print(
+                f"[行情] {code} -> {ts_code} close={normalized['close']} "
+                f"trade_date={normalized.get('trade_date')} source={quote.get('data_source')}"
+            )
+            return normalized
+    except Exception as e:
+        warn_tushare_mock(f"get_current_price {code}: {e}")
 
     if not force_refresh:
         cached = _load_cached_quote(code)
         if cached and _to_float(cached.get("close")) > 0:
-            latest_td = await svc._resolve_latest_trade_date(svc._cn_now())
-            cached_td = str(cached.get("trade_date", ""))
-            if cached_td and cached_td >= latest_td:
+            try:
+                latest_td = await svc._resolve_latest_trade_date(svc._cn_now())
+                cached_td = str(cached.get("trade_date", ""))
+                if cached_td and cached_td >= latest_td:
+                    if cached.get("pct_chg") is None:
+                        cached["pct_chg"] = _calc_today_change_pct(
+                            _to_float(cached.get("close")),
+                            _to_float(cached.get("pre_close")),
+                        )
+                    print(
+                        f"[行情] {code} 使用缓存 close={cached.get('close')} "
+                        f"trade_date={cached.get('trade_date')}"
+                    )
+                    return cached
+                print(
+                    f"[行情] {code} 缓存过期 trade_date={cached_td} < latest={latest_td}，重新拉取"
+                )
+            except Exception as e:
+                warn_tushare_mock(f"resolve_trade_date {code}: {e}")
                 if cached.get("pct_chg") is None:
                     cached["pct_chg"] = _calc_today_change_pct(
                         _to_float(cached.get("close")),
                         _to_float(cached.get("pre_close")),
                     )
-                print(
-                    f"[行情] {code} 使用缓存 close={cached.get('close')} "
-                    f"trade_date={cached.get('trade_date')}"
-                )
                 return cached
-            print(
-                f"[行情] {code} 缓存过期 trade_date={cached_td} < latest={latest_td}，重新拉取"
-            )
 
-    if svc.is_fund_code(ts_code, asset_type):
-        mock = svc._mock_quote(ts_code)
-        if mock and _to_float(mock.get("close")) > 0:
-            normalized = _daily_row_to_quote(ts_code, mock)
-            _save_cached_quote(code, normalized)
-            print(f"[行情] {code} 使用 Mock 净值 close={normalized['close']}")
-            return normalized
-
-    print(f"[行情] {code} 无法获取有效收盘价")
-    return None
+    warn_tushare_mock(code)
+    mock = mock_quote_row(code, asset_type)
+    normalized = _daily_row_to_quote(ts_code, mock)
+    _save_cached_quote(code, normalized)
+    return normalized
 
 
 def _quote_lookup_key(code: str) -> str:
@@ -234,21 +242,25 @@ def _resolve_asset_quote(
 
     svc = DataService()
     ts_code = svc._normalize_ts_code(asset_code)
-    mock = svc._mock_quote(ts_code)
-    if mock and _to_float(mock.get("close")) > 0:
-        close = _to_float(mock.get("close"))
-        pre_close = _to_float(mock.get("pre_close"))
-        pct_chg = _calc_today_change_pct(close, pre_close, mock.get("pct_chg"))
-        normalized = {**mock, "close": close, "pre_close": pre_close, "pct_chg": pct_chg}
-        _save_cached_quote(asset_code, normalized)
-        return {
-            "close": close,
-            "pre_close": pre_close,
-            "pct_chg": pct_chg,
-            "trade_date": str(mock.get("trade_date", "")),
-            "data_source": "Mock净值",
-            "price_status": "cached",
-        }
+    try:
+        mock = mock_quote_row(asset_code, asset_type)
+        if mock and _to_float(mock.get("close")) > 0:
+            close = _to_float(mock.get("close"))
+            pre_close = _to_float(mock.get("pre_close"))
+            pct_chg = _calc_today_change_pct(close, pre_close, mock.get("pct_chg"))
+            normalized = {**mock, "close": close, "pre_close": pre_close, "pct_chg": pct_chg}
+            _save_cached_quote(asset_code, normalized)
+            warn_tushare_mock(asset_code)
+            return {
+                "close": close,
+                "pre_close": pre_close,
+                "pct_chg": pct_chg,
+                "trade_date": str(mock.get("trade_date", "")),
+                "data_source": "Mock净值",
+                "price_status": "cached",
+            }
+    except Exception as e:
+        warn_tushare_mock(f"_resolve_asset_quote {asset_code}: {e}")
 
     return {
         "close": None,
@@ -311,22 +323,28 @@ async def fetch_asset_history(
     end = datetime.now()
     start = end - timedelta(days=days)
     sd, ed = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
-    daily = await svc.fetch_ohlcv_data(ts_code, sd, ed, asset_type=asset_type) or []
-    daily = sorted(daily, key=lambda x: x.get("trade_date", ""))
 
-    if svc.is_fund_code(ts_code, asset_type):
-        return daily
+    try:
+        daily = await svc.fetch_ohlcv_data(ts_code, sd, ed, asset_type=asset_type) or []
+        daily = sorted(daily, key=lambda x: x.get("trade_date", ""))
 
-    basic = await svc.fetch_daily_basic_historical(ts_code, sd, ed) or []
-    basic_map = {b.get("trade_date"): b for b in basic}
-    rows = []
-    for d in daily:
-        td = d.get("trade_date")
-        merged = dict(d)
-        if td in basic_map:
-            merged.update({k: basic_map[td].get(k) for k in ("pe", "pb", "ps", "turnover_rate")})
-        rows.append(merged)
-    return rows
+        if svc.is_fund_code(ts_code, asset_type):
+            return daily
+
+        basic = await svc.fetch_daily_basic_historical(ts_code, sd, ed) or []
+        basic_map = {b.get("trade_date"): b for b in basic}
+        rows = []
+        for d in daily:
+            td = d.get("trade_date")
+            merged = dict(d)
+            if td in basic_map:
+                merged.update({k: basic_map[td].get(k) for k in ("pe", "pb", "ps", "turnover_rate")})
+            rows.append(merged)
+        return rows
+    except Exception as e:
+        warn_tushare_mock(f"fetch_asset_history {ts_code}: {e}")
+        mock_row = mock_quote_row(ts_code, asset_type)
+        return [mock_row]
 
 
 async def _fetch_quotes_parallel(assets: List, timeout: float = 20.0) -> Dict[str, Any]:
@@ -519,45 +537,76 @@ class QuoteRefreshInput(BaseModel):
 @router.post("/refresh-quotes")
 async def refresh_portfolio_quotes(data: QuoteRefreshInput, db: Session = Depends(get_db)):
     """刷新持仓最新收盘价/净值，供诊断页与情绪纠偏页同步现价"""
-    if not data.assets:
-        return {"assets": [], "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    try:
+        if not data.assets:
+            return {"assets": [], "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
-    refreshed: List[Dict[str, Any]] = []
-    for asset in data.assets:
-        quote = await fetch_quote_for_asset(
-            asset.code,
-            asset_type=asset.asset_type,
-            force_refresh=True,
-        )
-        quote_info = _resolve_asset_quote(asset.code, quote, asset_type=asset.asset_type)
-        qty = float(asset.quantity or 0)
-        cost = _to_float(asset.cost_price)
-        close_val = quote_info.get("close")
-        has_price = close_val is not None and _to_float(close_val) > 0
-        current_price = round(_to_float(close_val), 2) if has_price else None
-        market_value = round(current_price * qty, 2) if has_price and current_price is not None else None
+        refreshed: List[Dict[str, Any]] = []
+        for asset in data.assets:
+            try:
+                quote = await fetch_quote_for_asset(
+                    asset.code,
+                    asset_type=asset.asset_type,
+                    force_refresh=True,
+                )
+            except Exception as e:
+                warn_tushare_mock(f"refresh-quotes {asset.code}: {e}")
+                quote = _daily_row_to_quote(
+                    DataService._normalize_ts_code(asset.code),
+                    mock_quote_row(asset.code, asset.asset_type),
+                )
 
-        row = {
-            "code": asset.code,
-            "name": asset.name,
-            "current_price": current_price,
-            "market_value": market_value,
-            "cost_price": round(cost, 2) if cost > 0 else None,
-            "trade_date": quote_info.get("trade_date", ""),
-            "data_source": quote_info.get("data_source", ""),
-            "price_status": quote_info.get("price_status", "pending"),
-            "today_change_pct": quote_info.get("pct_chg"),
+            quote_info = _resolve_asset_quote(asset.code, quote, asset_type=asset.asset_type)
+            qty = float(asset.quantity or 0)
+            cost = _to_float(asset.cost_price)
+            close_val = quote_info.get("close")
+            has_price = close_val is not None and _to_float(close_val) > 0
+            current_price = round(_to_float(close_val), 2) if has_price else None
+            market_value = round(current_price * qty, 2) if has_price and current_price is not None else None
+
+            row = {
+                "code": asset.code,
+                "name": asset.name,
+                "current_price": current_price,
+                "market_value": market_value,
+                "cost_price": round(cost, 2) if cost > 0 else None,
+                "trade_date": quote_info.get("trade_date", ""),
+                "data_source": quote_info.get("data_source", ""),
+                "price_status": quote_info.get("price_status", "pending"),
+                "today_change_pct": quote_info.get("pct_chg"),
+            }
+            refreshed.append(row)
+            print(
+                f"[刷新现价] {asset.code} {asset.name} current_price={current_price} "
+                f"trade_date={row['trade_date']} source={row['data_source']}"
+            )
+
+        return {
+            "assets": refreshed,
+            "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
-        refreshed.append(row)
-        print(
-            f"[刷新现价] {asset.code} {asset.name} current_price={current_price} "
-            f"trade_date={row['trade_date']} source={row['data_source']}"
-        )
-
-    return {
-        "assets": refreshed,
-        "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
+    except Exception as e:
+        warn_tushare_mock(f"refresh-quotes: {e}")
+        refreshed = []
+        for asset in data.assets or []:
+            mock = mock_quote_row(asset.code, asset.asset_type)
+            qty = float(asset.quantity or 0)
+            close = _to_float(mock.get("close"), 10.0)
+            refreshed.append({
+                "code": asset.code,
+                "name": asset.name,
+                "current_price": round(close, 2),
+                "market_value": round(close * qty, 2),
+                "cost_price": round(_to_float(asset.cost_price), 2) if asset.cost_price else None,
+                "trade_date": str(mock.get("trade_date", "")),
+                "data_source": "Mock净值",
+                "price_status": "cached",
+                "today_change_pct": mock.get("pct_chg"),
+            })
+        return {
+            "assets": refreshed,
+            "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
 
 
 class RiskAssessmentInput(BaseModel):
@@ -615,6 +664,58 @@ def _get_sector(code: str) -> str:
 @router.post("/diagnose")
 async def diagnose_portfolio(data: PortfolioInput, db: Session = Depends(get_db)):
     """AI持仓诊断 - 基于真实持仓数据生成结论"""
+    try:
+        return await _diagnose_portfolio_impl(data, db)
+    except Exception as e:
+        warn_tushare_mock(f"diagnose: {e}")
+        request_id = f"diag_{datetime.now().strftime('%Y%m%d%H%M%S')}_mock"
+        assets = data.assets or []
+        mock_metrics = []
+        for asset in assets:
+            mock = mock_quote_row(asset.code, asset.asset_type)
+            quote_info = _resolve_asset_quote(asset.code, _daily_row_to_quote(
+                DataService._normalize_ts_code(asset.code), mock,
+            ), asset_type=asset.asset_type)
+            mock_metrics.append(_build_asset_metrics(asset, quote_info))
+        total_cost = sum(m.get("position_cost") or 0 for m in mock_metrics)
+        total_current = sum(m.get("market_value") or 0 for m in mock_metrics)
+        return {
+            "request_id": request_id,
+            "audit_logs": [],
+            "confidence": 70,
+            "summary": {
+                "total_assets": len(assets),
+                "risk_assets": 0,
+                "opportunity_assets": 0,
+                "time_saved": len(assets) * 5,
+            },
+            "analysis": {
+                "market_trend": "Tushare 暂不可用，以下为 Mock 行情下的参考结论。",
+                "sector_rotation": "数据恢复后将更新板块分析。",
+                "risk_points": ["当前使用 Mock 行情，请以实际行情为准"],
+                "opportunities": ["建议稍后重新诊断以获取最新数据"],
+            },
+            "data_source": {
+                "time_range": "-",
+                "sources": ["Mock行情"],
+                "update_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            },
+            "detail": {
+                "total_cost": round(total_cost, 2),
+                "total_market_value": round(total_current, 2),
+                "total_profit_amount": round(total_current - total_cost, 2),
+                "total_change_pct": 0,
+                "risk_assets_detail": [],
+                "opportunity_assets_detail": [],
+                "sector_performance": {},
+                "assets": mock_metrics,
+                "lstm_forecast": {"available": False, "forecasts": [], "reason": "Mock模式"},
+                "rf_assessment": {"model_available": False, "high_risk_count": 0, "asset_predictions": []},
+            },
+        }
+
+
+async def _diagnose_portfolio_impl(data: PortfolioInput, db: Session):
     request_id = f"diag_{datetime.now().strftime('%Y%m%d%H%M%S')}_{datetime.now().microsecond // 1000:03d}"
     audit_logs: List[Dict[str, Any]] = []
     assets = data.assets

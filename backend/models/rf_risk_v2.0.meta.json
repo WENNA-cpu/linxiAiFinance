@@ -1,0 +1,27 @@
+{
+  "train_samples": 10944,
+  "test_samples": 2736,
+  "train_accuracy": 0.7900219298245614,
+  "test_accuracy": 0.5482456140350878,
+  "recall_macro": 0.5490444766554776,
+  "f1_macro": 0.5473875865774497,
+  "feature_importance": {
+    "volatility": 0.1766376596379953,
+    "turnover_rate": 0.13316581161879318,
+    "pe_percentile": 0.2309022951858919,
+    "pb_percentile": 0.24321740626991106,
+    "volume_change_rate": 0.10049751120501589,
+    "amplitude": 0.1155793160823927
+  },
+  "model_path": "E:\\linxiAiFinance\\backend\\models\\rf_risk_v2.0.pkl",
+  "features": [
+    "volatility",
+    "turnover_rate",
+    "pe_percentile",
+    "pb_percentile",
+    "volume_change_rate",
+    "amplitude"
+  ],
+  "years": 3,
+  "data_source": "AKShare估值(优先) + Tushare日线"
+}

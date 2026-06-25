@@ -69,6 +69,14 @@ interface SentimentData {
   };
 }
 
+const MOCK_SENTIMENT: SentimentData = {
+  sentiment_index: 50,
+  status: '中性',
+  market_state: '震荡整理',
+  warning_signals: 0,
+  update_time: '',
+};
+
 const sentimentData = ref<SentimentData | null>(null);
 const marketEmotion = ref<'fear' | 'neutral' | 'greed'>('neutral');
 
@@ -113,7 +121,7 @@ interface AssetPnlRow {
 }
 
 const readAssetCost = (asset: RawAsset): number | null => {
-  const raw = asset as Record<string, unknown>;
+  const raw = asset as unknown as Record<string, unknown>;
   const candidates = [asset.costPrice, asset.cost, asset.cost_price, raw.cost, raw.cost_price];
   for (const value of candidates) {
     const num = Number(value);
@@ -123,7 +131,7 @@ const readAssetCost = (asset: RawAsset): number | null => {
 };
 
 const readAssetCurrentPrice = (asset: RawAsset): number | null => {
-  const raw = asset as Record<string, unknown>;
+  const raw = asset as unknown as Record<string, unknown>;
   const candidates = [asset.currentPrice, asset.current_price, raw.current_price];
   for (const value of candidates) {
     const num = Number(value);
@@ -177,25 +185,6 @@ const getAssetPnlRow = (asset: RawAsset): AssetPnlRow => {
 };
 
 const assetPnlRows = computed(() => portfolioAssets.value.map(getAssetPnlRow));
-
-const logAssetPnlDebug = (rows: AssetPnlRow[]) => {
-  if (!rows.length) return;
-  console.group('[情绪纠偏] 持仓盈亏判断');
-  console.table(
-    rows.map((row) => ({
-      名称: row.name,
-      代码: row.code,
-      cost: row.cost,
-      current_price: row.currentPrice,
-      状态: row.statusLabel,
-    })),
-  );
-  console.groupEnd();
-};
-
-watch(assetPnlRows, (rows) => {
-  logAssetPnlDebug(rows);
-}, { immediate: true, deep: true });
 
 const industryByCode = computed(() => {
   const map = new Map<string, string>();
@@ -556,11 +545,18 @@ const fetchSentimentData = async () => {
       throw new Error('数据获取失败');
     }
     const data = (await response.json()) as SentimentData;
+    if (data.sentiment_index == null || Number.isNaN(Number(data.sentiment_index))) {
+      throw new Error('情绪指数无效');
+    }
     sentimentData.value = data;
     writeSentimentCache(data);
   } catch {
-    sentimentError.value = '数据获取失败';
-    sentimentData.value = null;
+    const fallback: SentimentData = {
+      ...MOCK_SENTIMENT,
+      update_time: new Date().toLocaleString('zh-CN'),
+    };
+    sentimentData.value = fallback;
+    sentimentError.value = '';
   } finally {
     isSentimentLoading.value = false;
   }
@@ -855,17 +851,13 @@ watch(portfolioAssets, () => {
                   <li
                     v-for="row in lossAversion?.rows"
                     :key="row.code"
-                    class="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-slate-600"
+                    class="flex items-center justify-between gap-2 text-slate-600"
                   >
                     <span class="font-medium text-slate-700">{{ row.name }}</span>
-                    <span>
-                      cost={{ row.cost ?? '—' }} · current_price={{ row.currentPrice ?? '—' }}
-                      ·
-                      <span
-                        :class="row.status === 'loss' ? 'text-red-600' : row.status === 'profit' ? 'text-emerald-600' : row.status === 'missing' ? 'text-amber-600' : 'text-slate-500'"
-                      >
-                        {{ row.statusLabel }}
-                      </span>
+                    <span
+                      :class="row.status === 'loss' ? 'text-red-600' : row.status === 'profit' ? 'text-emerald-600' : row.status === 'missing' ? 'text-amber-600' : 'text-slate-500'"
+                    >
+                      {{ row.statusLabel }}
                     </span>
                   </li>
                 </ul>

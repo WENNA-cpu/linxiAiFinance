@@ -1,12 +1,17 @@
 import aiohttp
 import asyncio
 import json
+import logging
 import os
 import time
 import pandas as pd
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, timedelta
+
+from app.services.akshare_service import get_daily_basic as akshare_get_daily_basic
+
+logger = logging.getLogger(__name__)
 
 _CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "cache" / "tushare"
 
@@ -359,19 +364,28 @@ class DataService:
             return [dict(zip(fields, item)) for item in items]
         return None
 
-    async def fetch_daily_basic(self, ts_code: str, trade_date: str = None) -> Optional[List[Dict]]:
-        """获取每日指标（估值数据）"""
-        params = {"ts_code": ts_code}
-        if trade_date:
-            params["trade_date"] = trade_date
+    async def fetch_daily_basic(self, ts_code: str, trade_date: str = None) -> List[Dict]:
+        """获取每日指标（估值数据），AKShare 优先，失败降级 Tushare"""
+        ts_code = self._normalize_ts_code(ts_code)
+        end_date = trade_date or datetime.now().strftime("%Y%m%d")
+        start_date = (datetime.strptime(end_date, "%Y%m%d") - timedelta(days=30)).strftime("%Y%m%d")
 
-        data = await self._request("daily_basic", params)
+        rows = await self._fetch_daily_basic_from_akshare(ts_code, start_date, end_date)
+        if rows:
+            if trade_date:
+                matched = [r for r in rows if str(r.get("trade_date")) == trade_date]
+                return self._normalize_daily_basic_rows(matched or rows[:1])
+            return self._normalize_daily_basic_rows(rows)
 
-        if data and "items" in data:
-            fields = data.get("fields", [])
-            items = data.get("items", [])
-            return [dict(zip(fields, item)) for item in items]
-        return None
+        rows = await self._fetch_daily_basic_from_tushare(ts_code, start_date, end_date)
+        if rows:
+            if trade_date:
+                matched = [r for r in rows if str(r.get("trade_date")) == trade_date]
+                return self._normalize_daily_basic_rows(matched or rows[:1])
+            return self._normalize_daily_basic_rows(rows)
+
+        logger.warning("[DataService] %s daily_basic 双源均失败，返回空", ts_code)
+        return []
 
     def _disk_cache_path(self, ts_code: str) -> Path:
         safe = ts_code.replace(".", "_")
@@ -410,6 +424,111 @@ class DataService:
             return disk
         return None
 
+    def _rows_have_valuation(self, rows: List[Dict[str, Any]], min_ratio: float = 0.1) -> bool:
+        """判断估值行是否包含足够有效的 PE/PB"""
+        if not rows:
+            return False
+        valid = sum(
+            1 for r in rows
+            if self._to_float(r.get("pe"), default=0) > 0 or self._to_float(r.get("pb"), default=0) > 0
+        )
+        return valid >= max(1, int(len(rows) * min_ratio))
+
+    async def _fetch_daily_basic_from_akshare(
+        self,
+        ts_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> List[Dict[str, Any]]:
+        """主数据源：AKShare（stock_a_lg_indicator / stock_value_em + stock_zh_a_hist）"""
+        if self.is_fund_code(ts_code):
+            return []
+        try:
+            rows = await asyncio.to_thread(
+                akshare_get_daily_basic, ts_code, start_date, end_date
+            )
+            if rows and self._rows_have_valuation(rows):
+                logger.info(
+                    "[DataService] %s daily_basic source: akshare, range %s~%s, rows=%d",
+                    ts_code, start_date, end_date, len(rows),
+                )
+                return self._tag_data_source(rows, "akshare")
+            if rows:
+                logger.warning("[DataService] %s akshare 估值字段不足，rows=%d", ts_code, len(rows))
+        except Exception as exc:
+            logger.warning("[DataService] %s akshare daily_basic 失败: %s", ts_code, exc)
+        return []
+
+    async def _fetch_daily_basic_from_tushare(
+        self,
+        ts_code: str,
+        start_date: str,
+        end_date: str,
+        *,
+        fetch_start: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """备用数据源：Tushare daily_basic"""
+        if not self.tushare_token or self.is_fund_code(ts_code):
+            return []
+        try:
+            await self._wait_daily_basic_slot()
+            params: Dict[str, Any] = {"ts_code": ts_code}
+            if fetch_start:
+                params["start_date"] = fetch_start
+                params["end_date"] = end_date
+            data = await self._request("daily_basic", params)
+            DataService._last_daily_basic_at = time.time()
+
+            if not data or "items" not in data:
+                return []
+
+            fields = data.get("fields", [])
+            items = data.get("items", [])
+            rows = [dict(zip(fields, item)) for item in items]
+            if fetch_start:
+                rows = self._filter_by_date_range(rows, start_date, end_date)
+            if rows and self._rows_have_valuation(rows):
+                logger.info(
+                    "[DataService] %s daily_basic source: tushare, range %s~%s, rows=%d",
+                    ts_code, start_date, end_date, len(rows),
+                )
+                return self._tag_data_source(rows, "tushare")
+            if rows:
+                logger.warning("[DataService] %s tushare 估值字段不足，rows=%d", ts_code, len(rows))
+        except Exception as exc:
+            logger.warning("[DataService] %s tushare daily_basic 失败: %s", ts_code, exc)
+        return []
+
+    def _tag_data_source(self, rows: List[Dict[str, Any]], source: str) -> List[Dict[str, Any]]:
+        for row in rows:
+            row["source"] = source
+            row["data_source"] = source
+        return rows
+
+    def _normalize_daily_basic_rows(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """确保输出字段与 Tushare daily_basic 一致"""
+        normalized: List[Dict[str, Any]] = []
+        for row in rows:
+            pe = row.get("pe")
+            pb = row.get("pb")
+            turnover = row.get("turnover_rate")
+            normalized.append({
+                "ts_code": row.get("ts_code", ""),
+                "trade_date": str(row.get("trade_date", "")),
+                "pe": self._to_float(pe) if pe not in (None, "") else None,
+                "pb": self._to_float(pb) if pb not in (None, "") else None,
+                "turnover_rate": self._to_float(turnover) if turnover not in (None, "") else None,
+                "pe_ttm": row.get("pe_ttm"),
+                "ps": row.get("ps"),
+                "ps_ttm": row.get("ps_ttm"),
+                "total_mv": row.get("total_mv"),
+                "circ_mv": row.get("circ_mv"),
+                "close": row.get("close"),
+                "source": row.get("source", row.get("data_source", "")),
+                "data_source": row.get("data_source", row.get("source", "")),
+            })
+        return sorted(normalized, key=lambda x: str(x.get("trade_date", "")), reverse=True)
+
     def _filter_by_date_range(
         self,
         rows: List[Dict[str, Any]],
@@ -426,42 +545,39 @@ class DataService:
         ts_code: str,
         start_date: str,
         end_date: str,
-    ) -> Optional[List[Dict]]:
-        """获取历史每日指标（估值数据），带缓存与频率控制"""
+    ) -> List[Dict]:
+        """获取历史每日指标（估值数据），AKShare 优先，失败降级 Tushare"""
         ts_code = self._normalize_ts_code(ts_code)
-
-        cached_rows = self._get_cached_rows(ts_code)
-        if cached_rows:
-            filtered = self._filter_by_date_range(cached_rows, start_date, end_date)
-            if filtered:
-                return filtered
-
         fetch_end = end_date or datetime.now().strftime("%Y%m%d")
         fetch_start = (datetime.now() - timedelta(days=1095 + 45)).strftime("%Y%m%d")
 
-        await self._wait_daily_basic_slot()
-        data = await self._request("daily_basic", {
-            "ts_code": ts_code,
-            "start_date": fetch_start,
-            "end_date": fetch_end,
-        })
-        DataService._last_daily_basic_at = time.time()
+        ak_rows = await self._fetch_daily_basic_from_akshare(ts_code, start_date, fetch_end)
+        if ak_rows:
+            self._daily_basic_cache[ts_code] = (time.time(), ak_rows)
+            self._save_disk_cache(ts_code, ak_rows)
+            return self._normalize_daily_basic_rows(ak_rows)
 
-        if data and "items" in data:
-            fields = data.get("fields", [])
-            items = data.get("items", [])
-            rows = [dict(zip(fields, item)) for item in items]
-            if rows:
-                self._daily_basic_cache[ts_code] = (time.time(), rows)
-                self._save_disk_cache(ts_code, rows)
-            filtered = self._filter_by_date_range(rows, start_date, end_date)
-            if filtered:
-                return filtered
+        tushare_rows = await self._fetch_daily_basic_from_tushare(
+            ts_code, start_date, fetch_end, fetch_start=fetch_start,
+        )
+        if tushare_rows:
+            self._daily_basic_cache[ts_code] = (time.time(), tushare_rows)
+            self._save_disk_cache(ts_code, tushare_rows)
+            return self._normalize_daily_basic_rows(tushare_rows)
 
+        cached_rows = self._get_cached_rows(ts_code)
         if cached_rows:
-            return self._filter_by_date_range(cached_rows, start_date, end_date)
+            filtered = self._filter_by_date_range(cached_rows, start_date, fetch_end)
+            if filtered and self._rows_have_valuation(filtered):
+                source = filtered[0].get("source") or filtered[0].get("data_source") or "cache"
+                logger.info(
+                    "[DataService] %s daily_basic source: %s (cache), rows=%d",
+                    ts_code, source, len(filtered),
+                )
+                return self._normalize_daily_basic_rows(filtered)
 
-        return None
+        logger.warning("[DataService] %s daily_basic 双源均失败，返回空", ts_code)
+        return []
 
     async def fetch_index_daily(self, ts_code: str = "000001.SH") -> Optional[List[Dict]]:
         """获取指数日线数据"""
